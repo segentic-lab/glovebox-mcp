@@ -136,6 +136,18 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
 - `mcp-config.json` — a ready-to-paste MCP client config snippet.
 
+## Credits
+
+`local` vision mode uses Microsoft's [OmniParser](https://github.com/microsoft/OmniParser)
+(cloned and weights downloaded by `install.sh`, under its own license). Screen capture uses
+[mss](https://github.com/BoboTiG/python-mss); input is driven with
+[xdotool](https://github.com/jordansissel/xdotool). Not affiliated with Microsoft.
+
+## Contributing
+
+Shipped **as-is** under MIT. Issues and PRs are welcome, but this is maintained by one person —
+**no support or response time is guaranteed.** If it's useful to you, a ⭐ helps.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

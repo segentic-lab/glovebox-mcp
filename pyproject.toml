@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glovebox-mcp"
+version = "0.1.0"
+description = "Sandboxed computer-use MCP — drive a real browser + desktop apps in a nested X11 window."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Sebastijan Bandur" }]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "computer-use",
+  "automation",
+  "xephyr",
+  "ai-agents",
+  "browser-automation",
+  "sandbox",
+]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: Software Development :: Testing",
+]
+# Core runtime. The 'claude' vision mode needs only these (plus system packages:
+# Xephyr, openbox, scrot, xdotool, wmctrl — see install.sh).
+dependencies = [
+  "mcp[cli]",
+  "mss",
+  "Pillow",
+  "websocket-client",
+]
+
+[project.optional-dependencies]
+# 'basic' vision — Tesseract OCR grounding (CPU).
+basic = ["pytesseract"]
+# 'local' vision — OmniParser grounding (GPU). transformers pinned for Florence-2.
+local = [
+  "torch",
+  "torchvision",
+  "ultralytics==8.3.70",
+  "transformers==4.49.0",
+  "accelerate",
+  "timm",
+  "einops==0.8.0",
+  "easyocr",
+  "supervision==0.18.0",
+  "opencv-python-headless",
+  "numpy==1.26.4",
+  "huggingface_hub",
+]
+
+[project.urls]
+Repository = "https://github.com/segentic-lab/glovebox-mcp"
+
+[tool.setuptools]
+py-modules = ["server"]

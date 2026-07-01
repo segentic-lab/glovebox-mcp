@@ -1,0 +1,7 @@
+# Core runtime deps (the 'claude' vision mode needs only these).
+# System packages (Xephyr, openbox, scrot, xdotool, wmctrl) + the 'basic'/'local'
+# vision backends are handled by ./install.sh <mode> — see README.
+mcp[cli]
+mss
+Pillow
+websocket-client
