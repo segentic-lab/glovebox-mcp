@@ -6,11 +6,11 @@
 # so the agent's mouse/keyboard/screenshots are CONFINED TO THIS WINDOW —
 # it cannot touch your real desktop, files, or other apps.
 #
-# Usage:   ./start-display.sh        (run once; leave it open)
+# Usage:   ./start-display.sh [WxH]   (e.g. ./start-display.sh 1920x1080; default 1440x900; leave open)
 # Stop:    pkill Xephyr              (closes the whole sandbox)
 set -e
 DISP=:1
-RES="${RES:-1440x900}"
+RES="${1:-${RES:-1440x900}}"   # screen size: positional arg, else $RES, else 1440x900
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if ! xdpyinfo -display "$DISP" >/dev/null 2>&1; then

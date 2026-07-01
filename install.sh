@@ -8,7 +8,6 @@
 # System packages need sudo — the script prints the apt line for you to run.
 set -e
 MODE="${1:-}"
-[[ "$MODE" == "claude" ]] && MODE="none"   # legacy alias
 cd "$(dirname "$0")"
 DIR="$(pwd)"
 export PATH="$HOME/.local/bin:$PATH"

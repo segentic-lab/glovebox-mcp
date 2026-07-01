@@ -63,7 +63,8 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 
 1. **Start the sandbox** (leave it running):
    ```bash
-   ./start-display.sh          # opens a 1440×900 Xephyr window with a browser
+   ./start-display.sh              # 1440×900 Xephyr window with a browser
+   ./start-display.sh 1920x1080    # …or pass a screen size (or set $RES)
    ```
    Log into any sites or apps you want to automate **in that window**.
 2. **Register the server** with your MCP client (see `mcp-config.json`, point the paths at this repo):
@@ -145,6 +146,9 @@ files for that instance (readable by native apps and, since it's under `$HOME`, 
 - **Native apps** (GIMP, Inkscape, editors) → **`open_file(path, instance, app="gimp")`**, or just
   drive the app's own **Open dialog** — unlike the browser's, it's a real visible window you can type a
   path into (`Ctrl+L` in a GTK file chooser).
+- **Saving / downloads** → apps run as your user, so they can save anywhere you can write. `launch_app`
+  Chromium instances are pre-configured to **download and "save as" into `files/<N>/`**; point native
+  apps' Save dialogs there too, then `list_files(instance)` to see the results.
 
 ## Maintenance (`local` mode)
 

@@ -61,6 +61,8 @@ happens inside a nested X11 window (an "instance"), isolated from the user's rea
   `files/<N>/` under the install dir). Open a file in a native app with **`open_file(path, instance,
   app="gimp")`**, or drive the app's own Open dialog — that one *is* visible, so type the path (`Ctrl+L`
   in a GTK file chooser).
+- **Saving** — apps save to the host filesystem. Chromium instances download to `files/<N>/`
+  automatically; point native Save dialogs there too, then `list_files(instance)` to confirm.
 - **Browser navigation** — `press_keys("ctrl+l")` → `press_keys("ctrl+a")` →
   `type_text("https://…")` → `press_keys("Return")`. New tab: `press_keys("ctrl+t")`.
 - **Multi-instance / parallel** — for independent tasks, `launch_app` a new instance and pass its id

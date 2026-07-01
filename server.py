@@ -33,8 +33,6 @@ def _vision_mode() -> str:
             with open(f) as fh:
                 m = fh.read().strip()
     m = (m or "local").lower()
-    if m == "claude":            # legacy alias — the client's own vision does the grounding
-        m = "none"
     return m if m in ("none", "basic", "local") else "local"
 
 
@@ -235,7 +233,13 @@ def _app_env_args(n, command):
         appenv["GDK_BACKEND"] = "x11"
         if "--ozone-platform" not in command:
             prof = os.path.join(HERE, "profiles", f"chromium-{n}")
-            os.makedirs(prof, exist_ok=True)
+            os.makedirs(os.path.join(prof, "Default"), exist_ok=True)
+            _prefs = os.path.join(prof, "Default", "Preferences")
+            if not os.path.exists(_prefs):   # send downloads / "save as" to the instance's files/<N>/ folder
+                _dl = _files_dir(n)
+                with open(_prefs, "w") as fh:
+                    json.dump({"download": {"default_directory": _dl, "prompt_for_download": False},
+                               "savefile": {"default_directory": _dl}}, fh)
             args += ["--ozone-platform=x11", "--disable-gpu", "--no-first-run",
                      "--no-default-browser-check", "--start-maximized",
                      f"--remote-debugging-port={_cdp_port(n)}", "--remote-allow-origins=*",
