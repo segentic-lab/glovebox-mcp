@@ -22,21 +22,42 @@ that window*, and the agent operates only there — you can watch it live and cl
   does — clicks, typing, screenshots — is **confined to that window**, not your real desktop.
 - You stay in control: watch it live, `pkill Xephyr` to close everything.
 
+## Requirements
+
+- **Linux** — the sandbox nests a real X server (Xephyr), so it works even on **Wayland** hosts
+  (via Xwayland). Not macOS/Windows. Developed on Ubuntu; any modern Linux with the packages below.
+- **Python 3.10+** and [`uv`](https://docs.astral.sh/uv/) (used for the virtualenv).
+- **System packages** (the installer prints the exact `apt` line): `xserver-xephyr openbox scrot
+  x11-utils xdotool wmctrl xclip` — plus `tesseract-ocr` for `basic` mode.
+- A **browser** in the sandbox (Chromium or Chrome).
+- **NVIDIA GPU (≥6 GB VRAM)** — only for the `local` vision mode.
+
 ## Install
 
-Pick a vision backend; the installer prints the one `sudo apt-get …` line the X11 sandbox needs:
+Clone, then run the installer for the vision backend you want. It prints the one `sudo apt-get …`
+line the X11 sandbox needs, then installs the Python deps for that mode:
 
 ```bash
-git clone https://github.com/YOUR-USER/glovebox-mcp && cd glovebox-mcp
-./install.sh <claude|basic|local>
+git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp
+
+./install.sh none      # no local models — your agent reads screenshots itself (lightest, instant)
+./install.sh basic     # Tesseract OCR grounding — text + coordinates, CPU-only
+./install.sh local     # OmniParser grounding on an NVIDIA GPU — text + icons (~4 GB weights)
 ```
 
-- **claude** — no local models; the agent reasons from `screenshot()`. Lightest, instant install.
-- **basic** — Tesseract OCR (text + coordinates), CPU-only.
-- **local** — OmniParser on the GPU (text **+ icons** with pixel-precise boxes). Best grounding;
-  preflights CUDA + ≥6 GB VRAM and downloads ~4 GB of weights.
+- **none** — no local grounding model; the agent's own multimodal vision reads the screenshots.
+- **basic** — Tesseract OCR: `parse_screen` returns text elements + coordinates (CPU-only).
+- **local** — OmniParser on the GPU: `parse_screen` returns text **+ icons** with pixel-precise boxes.
+  Best grounding; preflights CUDA + ≥6 GB VRAM and downloads ~4 GB of weights.
 
-Your choice is written to `.vision-mode` (override per-run with the `GLOVEBOX_VISION` env var).
+Your choice is written to `.vision-mode` (override per run with the `GLOVEBOX_VISION` env var).
+
+### Works with any MCP client / harness
+
+Claude Code, Cursor, Codex, or your own agent — it's a standard MCP server, not tied to any one host.
+Two compatibility notes: **`basic`/`local`** return element **coordinates as text**, so they work even
+with text-only agents; **`none`** relies on the client passing the tool's **screenshots** to a
+multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clients).
 
 ## Quickstart
 
@@ -82,7 +103,7 @@ In `local` mode OmniParser is **lazy-loaded** on first `parse_screen` (~6 s once
 
 | Mode | `parse_screen` | Needs | When |
 |---|---|---|---|
-| `claude` | disabled (returns a note) — use `screenshot()` + reason | nothing (mcp, mss, xdotool) | lightest; let the model's own vision do grounding |
+| `none` | disabled (returns a note) — use `screenshot()` + reason | nothing (mcp, mss, xdotool) | lightest; let the agent's own vision do grounding |
 | `basic` | Tesseract OCR → text elements + coords | `tesseract-ocr` + `pytesseract` | no GPU; text-only grounding |
 | `local` | OmniParser → text **+ icons** + coords | torch + CUDA + OmniParser weights | best grounding |
 
@@ -139,7 +160,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 ## Files
 
 - `server.py` — the MCP server (all tools).
-- `install.sh` — mode-aware installer (`claude` / `basic` / `local`).
+- `install.sh` — mode-aware installer (`none` / `basic` / `local`).
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
 - `AGENTS.md` — drop-in tool-usage instructions for the AI agent (paste into its system prompt).
 - `mcp-config.json` — a ready-to-paste MCP client config snippet.

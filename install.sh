@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Glovebox installer — pick the vision/grounding backend.
 #
-#   ./install.sh claude   lightest: no local models — the agent reasons from screenshots
+#   ./install.sh none     lightest: no local models — the agent reads screenshots itself
 #   ./install.sh basic     Tesseract OCR (text + coords), no GPU/torch
 #   ./install.sh local     OmniParser grounding on the GPU (text+icons), heaviest/best
 #
 # System packages need sudo — the script prints the apt line for you to run.
 set -e
 MODE="${1:-}"
+[[ "$MODE" == "claude" ]] && MODE="none"   # legacy alias
 cd "$(dirname "$0")"
 DIR="$(pwd)"
 export PATH="$HOME/.local/bin:$PATH"
 
-if [[ "$MODE" != "claude" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
-  echo "Usage: ./install.sh <claude|basic|local>"
-  echo "  claude — no local models (the agent's own vision); lightest, instant install"
+if [[ "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
+  echo "Usage: ./install.sh <none|basic|local>"
+  echo "  none   — no local grounding model (the agent's own vision); lightest, instant install"
   echo "  basic  — Tesseract OCR, no GPU"
   echo "  local  — OmniParser on GPU (best grounding; ~4GB downloads)"
   exit 1
@@ -44,14 +45,14 @@ elif [[ "$MODE" == "local" ]]; then
   # ---- CUDA + VRAM preflight (OmniParser = Florence-2 + YOLO) ----
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "✗ 'local' needs an NVIDIA GPU, but nvidia-smi was not found."
-    echo "  Use './install.sh basic' (Tesseract, CPU) or './install.sh claude' instead."; exit 1
+    echo "  Use './install.sh basic' (Tesseract, CPU) or './install.sh none' instead."; exit 1
   fi
   GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
   VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')
   echo "▶ GPU: ${GPU_NAME:-unknown} — ${VRAM:-?} MiB VRAM"
   if [[ -z "$VRAM" || "$VRAM" -lt 6000 ]]; then
     echo "✗ OmniParser needs ~6 GB VRAM; found ${VRAM:-0} MiB."
-    echo "  Use './install.sh basic' or './install.sh claude' instead."; exit 1
+    echo "  Use './install.sh basic' or './install.sh none' instead."; exit 1
   fi
   [[ "$VRAM" -lt 8000 ]] && echo "  ⚠ ${VRAM} MiB is tight — should work, but close other GPU apps before parsing."
   uv pip install --python "$PY" --index-url https://download.pytorch.org/whl/cu124 torch torchvision

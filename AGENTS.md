@@ -31,7 +31,7 @@ happens inside a nested X11 window (an "instance"), isolated from the user's rea
 
 - **`local` / `basic`** — call `parse_screen(instance)` to get numbered `elements`, then
   **`click_element(id, instance)`**. Do NOT guess coordinates when you have a parse.
-- **`claude`** — grounding is off: take a `screenshot`, reason about the pixel coordinates yourself,
+- **`none`** — no local grounding: take a `screenshot`, reason about the pixel coordinates yourself,
   then `click(x, y, instance)`.
 
 ## Tool cheat-sheet

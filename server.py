@@ -8,7 +8,7 @@ agents can drive different instances IN PARALLEL.
 Tools take `instance=N` (default 1 = the start-display.sh sandbox). Launch more with launch_app().
 Input is unicode-safe (xdotool); screenshots via mss; grounding backend is selectable:
 
-  GLOVEBOX_VISION = claude | basic | local   (env / .vision-mode file / default 'local')
+  GLOVEBOX_VISION = none | basic | local     (env / .vision-mode file / default 'local')
   GLOVEBOX_HOST_DISPLAY = :0                  (host display where new Xephyr windows appear)
 """
 import os, sys, io, json, base64, subprocess, time, shlex, signal
@@ -33,7 +33,9 @@ def _vision_mode() -> str:
             with open(f) as fh:
                 m = fh.read().strip()
     m = (m or "local").lower()
-    return m if m in ("claude", "basic", "local") else "local"
+    if m == "claude":            # legacy alias — the client's own vision does the grounding
+        m = "none"
+    return m if m in ("none", "basic", "local") else "local"
 
 
 VISION = _vision_mode()
@@ -315,9 +317,9 @@ def screenshot(instance: int = 1) -> MCPImage:
 
 
 def _do_parse(instance: int = 1, box_threshold: float = 0.05) -> str:
-    if VISION == "claude":
-        return json.dumps({"vision": "claude", "instance": instance,
-                           "note": "grounding disabled — use screenshot(instance) and reason about coords, then click(instance,x,y)."})
+    if VISION == "none":
+        return json.dumps({"vision": "none", "instance": instance,
+                           "note": "no local grounding — take screenshot(instance) and reason about pixel coords yourself, then click(x, y, instance)."})
     img = _grab(instance)
     W, H = img.width, img.height
     ann = f"/tmp/glovebox_annotated_{int(instance)}.png"
