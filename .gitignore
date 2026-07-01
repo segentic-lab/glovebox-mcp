@@ -1,0 +1,19 @@
+# python env
+.venv/
+__pycache__/
+*.pyc
+
+# runtime / machine-specific
+.vision-mode
+
+# per-instance + sandbox browser profiles (may contain your logins — never commit)
+profiles/
+chrome-profile/
+
+# vendored + downloaded by install.sh (OmniParser source + ~4 GB weights)
+OmniParser/
+
+# local MCP client config
+.mcp.json
+.dev.vars
+.env

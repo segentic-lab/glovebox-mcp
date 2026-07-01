@@ -1,0 +1,141 @@
+# glovebox-mcp
+
+A **sandboxed computer-use MCP server** — let an AI agent drive a real browser and desktop apps
+(mouse, keyboard, screenshots, vision grounding), confined to a **nested X11 window** so it can
+never touch your real screen, files, or other apps.
+
+Like a lab **glovebox**: the agent reaches in and manipulates real applications, sealed off from
+everything else. Bring the sandbox up, log into whatever sites or apps you want to automate *inside
+that window*, and the agent operates only there — you can watch it live and close it instantly.
+
+> Speaks the [Model Context Protocol](https://modelcontextprotocol.io), so it works with MCP clients
+> like Claude Code. Your host can run Wayland; the sandbox gives the agent a real X server to drive.
+
+## Why a nested X11 sandbox?
+
+- Most desktop automation (xdotool, PyAutoGUI) is **X11-only**, but many modern desktops run **Wayland**.
+- **Xephyr** provides a real X server *inside a single window* (`DISPLAY :1`). Everything the agent
+  does — clicks, typing, screenshots — is **confined to that window**, not your real desktop.
+- You stay in control: watch it live, `pkill Xephyr` to close everything.
+
+## Install
+
+Pick a vision backend; the installer prints the one `sudo apt-get …` line the X11 sandbox needs:
+
+```bash
+git clone https://github.com/YOUR-USER/glovebox-mcp && cd glovebox-mcp
+./install.sh <claude|basic|local>
+```
+
+- **claude** — no local models; the agent reasons from `screenshot()`. Lightest, instant install.
+- **basic** — Tesseract OCR (text + coordinates), CPU-only.
+- **local** — OmniParser on the GPU (text **+ icons** with pixel-precise boxes). Best grounding;
+  preflights CUDA + ≥6 GB VRAM and downloads ~4 GB of weights.
+
+Your choice is written to `.vision-mode` (override per-run with the `GLOVEBOX_VISION` env var).
+
+## Quickstart
+
+1. **Start the sandbox** (leave it running):
+   ```bash
+   ./start-display.sh          # opens a 1440×900 Xephyr window with a browser
+   ```
+   Log into any sites or apps you want to automate **in that window**.
+2. **Register the server** with your MCP client (see `mcp-config.json`, point the paths at this repo):
+   ```jsonc
+   { "mcpServers": { "glovebox": {
+       "command": "/absolute/path/to/glovebox-mcp/.venv/bin/python",
+       "args":    ["/absolute/path/to/glovebox-mcp/server.py"],
+       "env":     { "DISPLAY": ":1" }
+   } } }
+   ```
+   Restart the client so it loads the server.
+3. Ask the agent to screenshot / click / type — it operates **only** on the `:1` window.
+
+## Tools
+
+| Tool | What |
+|---|---|
+| `parse_screen()` | Vision grounding → JSON of every element (id, type, label, interactive, pixel-center) + a numbered Set-of-Mark image at `/tmp/glovebox_annotated.png`. (`local` mode: OmniParser on GPU, ~2 s.) |
+| `click_element(id)` | Click an element from the last `parse_screen` (no coordinate guessing). |
+| `screenshot()` | Screenshot of an instance. |
+| `click(x,y)` · `move_mouse` · `scroll` · `drag` · `double_click` | Pointer ops. |
+| `type_text(text)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps). |
+| `press_keys("ctrl+a"/"Return"/…)` | Keys/combos (xdotool syntax). |
+| `upload_file(filepath, selector?)` | Attach a local file to a page's `<input type=file>` via the **Chrome DevTools Protocol**. The nested X11 file picker is invisible to automation **and hangs the renderer**, so use this for all uploads — never click an upload button expecting a dialog. Works on Chromium started by `launch_app`/`start-display.sh` (they open a per-instance `--remote-debugging-port`, `9222+N`). |
+| `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n)` | Multi-instance control (see below). |
+| `wait_ms(ms)` · `get_screen_size()` | Timing / sandbox size. |
+
+Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** (see below).
+In `local` mode OmniParser is **lazy-loaded** on first `parse_screen` (~6 s once, then ~2 s/parse).
+
+### Vision backend (selectable)
+
+`GLOVEBOX_VISION` env var, or the `.vision-mode` file, or default `local`:
+
+| Mode | `parse_screen` | Needs | When |
+|---|---|---|---|
+| `claude` | disabled (returns a note) — use `screenshot()` + reason | nothing (mcp, mss, xdotool) | lightest; let the model's own vision do grounding |
+| `basic` | Tesseract OCR → text elements + coords | `tesseract-ocr` + `pytesseract` | no GPU; text-only grounding |
+| `local` | OmniParser → text **+ icons** + coords | torch + CUDA + OmniParser weights | best grounding |
+
+Switch anytime with `./install.sh <mode>` (installs only what that mode needs).
+
+### Multi-instance (a fleet of app windows)
+
+Every control tool takes **`instance=N`** (default 1 = the `start-display.sh` sandbox). Spin up more —
+each its own Xephyr display/window on the host desktop:
+
+- `launch_app(command, name?, size?)` → starts the next free `:N` running **any** GUI app
+  (`chromium`, `gimp`, `inkscape`, `xterm`, …). Chromium auto-gets X11 flags, a per-instance profile,
+  a remote-debugging port, and D-Bus isolation. Returns the instance id.
+- `list_instances()` · `close_instance(n)`.
+
+Because each display has its **own cursor**, multiple agents can drive different instances **in parallel** —
+one window each. The only shared resource is the GPU for `local`-mode `parse_screen` (it just queues).
+The host display for new windows is `GLOVEBOX_HOST_DISPLAY` (default `:0`); `XAUTHORITY` is auto-discovered.
+
+### One-call action + observe
+
+`click` · `click_element` · `type_text` · `press_keys` · `scroll` · `drag` · `double_click` take
+**`observe`** (`none` default · `screenshot` · `parse`) and **`settle_ms`**. With `observe="screenshot"`
+the action returns its result **and** the resulting screen in a single call (with `settle_ms` to let the
+page update first) — no separate screenshot round-trip. Default `none` keeps routine steps cheap; opt
+into `screenshot`/`parse` on the steps that change the page (navigations, submits).
+
+## Maintenance (`local` mode)
+
+`install.sh` clones [OmniParser](https://github.com/microsoft/OmniParser), downloads the v2 weights, and
+applies two patches automatically:
+
+- **PaddleOCR made optional** (this uses easyocr): `OmniParser/util/utils.py`'s
+  `from paddleocr import PaddleOCR` is wrapped in try/except and the module-level `paddle_ocr = PaddleOCR(...)`
+  is guarded with `… if PaddleOCR is not None else None`.
+- **`transformers` is pinned to 4.49.0** — newer releases break Florence-2's remote config.
+
+If you upgrade OmniParser manually, re-apply the PaddleOCR patch. Weights live in `OmniParser/weights/`.
+
+## Stop
+
+```bash
+pkill Xephyr      # closes the sandbox (browser + WM + display)
+```
+
+## Safety
+
+- The agent's input and vision are **scoped to the sandbox display** — it does not see or control your real desktop.
+- The server process runs as your user (shell/file access, like any MCP server); only its **GUI control** is
+  sandboxed to the Xephyr window. For OS-level isolation from your files, run it inside a VM or container.
+- You can watch everything live and close it instantly with `pkill Xephyr`.
+- Automate responsibly — only sites and services you are authorized to use.
+
+## Files
+
+- `server.py` — the MCP server (all tools).
+- `install.sh` — mode-aware installer (`claude` / `basic` / `local`).
+- `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
+- `mcp-config.json` — a ready-to-paste MCP client config snippet.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

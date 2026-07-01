@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "glovebox": {
+      "command": "/absolute/path/to/glovebox-mcp/.venv/bin/python",
+      "args": ["/absolute/path/to/glovebox-mcp/server.py"],
+      "env": {
+        "DISPLAY": ":1"
+      }
+    }
+  }
+}
