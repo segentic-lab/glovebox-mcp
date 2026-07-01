@@ -11,6 +11,10 @@ that window*, and the agent operates only there — you can watch it live and cl
 > Speaks the [Model Context Protocol](https://modelcontextprotocol.io), so it works with MCP clients
 > like Claude Code. Your host can run Wayland; the sandbox gives the agent a real X server to drive.
 
+![glovebox-mcp — an agent filling a sign-up form inside the sandbox](assets/demo.gif)
+
+<sub>An agent driving a real browser in the sandbox — gliding the cursor, inserting a unicode name (`Nadja Kovačič`), typing, and submitting. All confined to a nested X11 window.</sub>
+
 ## Why a nested X11 sandbox?
 
 - Most desktop automation (xdotool, PyAutoGUI) is **X11-only**, but many modern desktops run **Wayland**.
