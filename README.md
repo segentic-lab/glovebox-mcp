@@ -56,6 +56,9 @@ Your choice is written to `.vision-mode` (override per-run with the `GLOVEBOX_VI
    Restart the client so it loads the server.
 3. Ask the agent to screenshot / click / type — it operates **only** on the `:1` window.
 
+> **Driving it with an AI agent?** Paste [`AGENTS.md`](AGENTS.md) into the agent's system prompt — it
+> teaches the observe → act → verify loop, grounding, the upload/unicode gotchas, and when to stop.
+
 ## Tools
 
 | Tool | What |
@@ -138,6 +141,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - `server.py` — the MCP server (all tools).
 - `install.sh` — mode-aware installer (`claude` / `basic` / `local`).
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
+- `AGENTS.md` — drop-in tool-usage instructions for the AI agent (paste into its system prompt).
 - `mcp-config.json` — a ready-to-paste MCP client config snippet.
 
 ## Credits

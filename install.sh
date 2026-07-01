@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Glovebox installer — pick the vision/grounding backend.
 #
-#   ./install.sh claude   lightest: no local models — Claude reasons from screenshots
+#   ./install.sh claude   lightest: no local models — the agent reasons from screenshots
 #   ./install.sh basic     Tesseract OCR (text + coords), no GPU/torch
 #   ./install.sh local     OmniParser grounding on the GPU (text+icons), heaviest/best
 #
@@ -14,7 +14,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 if [[ "$MODE" != "claude" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
   echo "Usage: ./install.sh <claude|basic|local>"
-  echo "  claude — no local models (Claude vision); lightest, instant install"
+  echo "  claude — no local models (the agent's own vision); lightest, instant install"
   echo "  basic  — Tesseract OCR, no GPU"
   echo "  local  — OmniParser on GPU (best grounding; ~4GB downloads)"
   exit 1
@@ -55,6 +55,7 @@ elif [[ "$MODE" == "local" ]]; then
   fi
   [[ "$VRAM" -lt 8000 ]] && echo "  ⚠ ${VRAM} MiB is tight — should work, but close other GPU apps before parsing."
   uv pip install --python "$PY" --index-url https://download.pytorch.org/whl/cu124 torch torchvision
+  # openai + matplotlib are imported by OmniParser's util.utils at import time (not used for inference here).
   uv pip install --python "$PY" ultralytics==8.3.70 "transformers==4.49.0" accelerate timm einops==0.8.0 \
     easyocr supervision==0.18.0 opencv-python-headless "numpy==1.26.4" huggingface_hub openai matplotlib
   [[ -d OmniParser ]] || git clone --depth 1 https://github.com/microsoft/OmniParser.git
@@ -82,4 +83,4 @@ PYP
 fi
 
 echo "$MODE" > .vision-mode
-echo "✓ Done. Vision mode = $MODE (.vision-mode). Restart Claude Code to apply."
+echo "✓ Done. Vision mode = $MODE (.vision-mode). Restart your MCP client to apply."

@@ -30,7 +30,8 @@ def _vision_mode() -> str:
     if not m:
         f = os.path.join(HERE, ".vision-mode")
         if os.path.exists(f):
-            m = open(f).read().strip()
+            with open(f) as fh:
+                m = fh.read().strip()
     m = (m or "local").lower()
     return m if m in ("claude", "basic", "local") else "local"
 
@@ -40,6 +41,7 @@ mcp = FastMCP("glovebox")
 
 INSTANCES = {}   # N -> {name, command, size, xephyr_pid, app_pid}
 _LAST = {}       # N -> {element id -> (cx, cy)} from that instance's last parse_screen
+_SCAN_MAX = 12   # highest display :N that list_instances probes for already-running sandboxes
 
 
 # ---------- display / process helpers ----------
@@ -268,7 +270,7 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
 def list_instances() -> str:
     """List all instances (running app windows) with their display + name."""
     _register_existing()
-    seen = set(INSTANCES) | {k for k in range(1, 10) if _up(k)}
+    seen = set(INSTANCES) | {k for k in range(1, _SCAN_MAX + 1) if _up(k)}
     out = []
     for n in sorted(seen):
         info = INSTANCES.get(n, {})
@@ -343,7 +345,8 @@ def _observe(instance, mode, settle_ms, text):
         out = [text, pj]
         ann = f"/tmp/glovebox_annotated_{int(instance)}.png"
         if os.path.exists(ann):
-            out.append(MCPImage(data=open(ann, "rb").read(), format="png"))
+            with open(ann, "rb") as fh:
+                out.append(MCPImage(data=fh.read(), format="png"))
         return out
     return text
 
