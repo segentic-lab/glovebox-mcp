@@ -17,3 +17,6 @@ OmniParser/
 .mcp.json
 .dev.vars
 .env
+
+# per-instance file staging folders (may hold user files — never commit)
+files/

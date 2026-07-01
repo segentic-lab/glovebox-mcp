@@ -55,6 +55,14 @@ def _env(n) -> dict:
     return {**os.environ, "DISPLAY": _disp(n)}
 
 
+def _files_dir(n) -> str:
+    """Per-instance staging folder inside the install dir (files/<N>/). Auto-created.
+    A stable place to drop files for an instance; also readable by snap Chromium (it's under $HOME)."""
+    d = os.path.join(HERE, "files", str(int(n)))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _xdotool(n, *args):
     return subprocess.run(["xdotool", *args], env=_env(n), capture_output=True, text=True)
 
@@ -90,6 +98,7 @@ def _register_existing():
     if _up(1) and 1 not in INSTANCES:
         INSTANCES[1] = {"name": "sandbox", "command": "(start-display.sh)", "size": "?",
                         "xephyr_pid": None, "app_pid": None}
+        _files_dir(1)
 
 
 # ---------- Chrome DevTools Protocol (file uploads bypass the broken native GTK picker) ----------
@@ -214,6 +223,32 @@ def _parse_omni(img, box_threshold, annotated_path):
     return elems
 
 
+def _app_env_args(n, command):
+    """Env + argv to launch a GUI `command` on instance n's display. Chromium gets X11 flags,
+    a per-instance profile, and a CDP debug port; other GTK apps get D-Bus isolation so they
+    render ON this display instead of forwarding their window to an app on the host."""
+    appenv = _env(n)
+    args = shlex.split(command)
+    base = os.path.basename(args[0]) if args else ""
+    if base in ("chromium", "chromium-browser", "chrome", "google-chrome"):
+        appenv.pop("WAYLAND_DISPLAY", None)
+        appenv["GDK_BACKEND"] = "x11"
+        if "--ozone-platform" not in command:
+            prof = os.path.join(HERE, "profiles", f"chromium-{n}")
+            os.makedirs(prof, exist_ok=True)
+            args += ["--ozone-platform=x11", "--disable-gpu", "--no-first-run",
+                     "--no-default-browser-check", "--start-maximized",
+                     f"--remote-debugging-port={_cdp_port(n)}", "--remote-allow-origins=*",
+                     f"--user-data-dir={prof}"]
+    else:
+        appenv.pop("WAYLAND_DISPLAY", None)
+        appenv.setdefault("GDK_BACKEND", "x11")
+        import shutil
+        if shutil.which("dbus-run-session"):
+            args = ["dbus-run-session", "--"] + args
+    return appenv, args, base
+
+
 # ---------- instance management ----------
 @mcp.tool()
 def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
@@ -234,27 +269,7 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
         return json.dumps({"error": f"Xephyr {_disp(n)} did not start (host display {HOST} reachable?)"})
     subprocess.Popen(["openbox"], env=_env(n), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
-    appenv = _env(n)
-    args = shlex.split(command)
-    base = os.path.basename(args[0]) if args else ""
-    if base in ("chromium", "chromium-browser", "chrome", "google-chrome"):
-        appenv.pop("WAYLAND_DISPLAY", None)
-        appenv["GDK_BACKEND"] = "x11"
-        if "--ozone-platform" not in command:
-            prof = os.path.join(HERE, "profiles", f"chromium-{n}")
-            os.makedirs(prof, exist_ok=True)
-            args += ["--ozone-platform=x11", "--disable-gpu", "--no-first-run",
-                     "--no-default-browser-check", "--start-maximized",
-                     f"--remote-debugging-port={_cdp_port(n)}", "--remote-allow-origins=*",
-                     f"--user-data-dir={prof}"]
-    else:
-        # Force X11 + isolate the D-Bus session so GTK single-instance apps (inkscape, gimp, …)
-        # open ON THIS display instead of forwarding their window to an instance on the host.
-        appenv.pop("WAYLAND_DISPLAY", None)
-        appenv.setdefault("GDK_BACKEND", "x11")
-        import shutil
-        if shutil.which("dbus-run-session"):
-            args = ["dbus-run-session", "--"] + args
+    appenv, args, base = _app_env_args(n, command)
     app = subprocess.Popen(args, env=appenv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # maximize the app window to fill the display once it maps (handles slow-starting apps too)
     subprocess.Popen(
@@ -265,7 +280,8 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
         env=_env(n), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     INSTANCES[n] = {"name": name or base, "command": command, "size": size,
                     "xephyr_pid": xeph.pid, "app_pid": app.pid}
-    return json.dumps({"instance": n, "display": _disp(n), "name": INSTANCES[n]["name"]})
+    return json.dumps({"instance": n, "display": _disp(n), "name": INSTANCES[n]["name"],
+                       "files_dir": _files_dir(n)})
 
 
 @mcp.tool()
@@ -426,7 +442,9 @@ def upload_file(filepath: str, instance: int = 1, selector: str = "input[type=fi
     Works on Chromium started by launch_app / start-display.sh (they open a per-instance
     --remote-debugging-port). `selector` targets the file input on the MAIN page (default = first file
     input). If the site only inserts the <input> after you click its 'upload' control, click that first
-    (it won't open a dialog we can see, but it wires up the input), then call this. `observe`/`settle_ms`: see click()."""
+    (it won't open a dialog we can see, but it wires up the input), then call this.
+    NATIVE (non-browser) apps: use open_file() or drive the app's own Open dialog — it IS visible here.
+    `observe`/`settle_ms`: see click()."""
     if not os.path.exists(filepath):
         return json.dumps({"error": f"file not found: {filepath}"})
     try:
@@ -435,6 +453,38 @@ def upload_file(filepath: str, instance: int = 1, selector: str = "input[type=fi
         return json.dumps({"error": f"upload failed: {e}"})
     return _observe(instance, observe, settle_ms,
                     f"[{_disp(instance)}] set '{selector}' = {os.path.basename(filepath)} via CDP")
+
+
+@mcp.tool()
+def open_file(filepath: str, instance: int = 1, app: str = "") -> str:
+    """Open a local file in an app ON an existing instance's display (NOT a new instance).
+    If `app` is given, runs `<app> <filepath>` there (e.g. app='gimp'); otherwise tries xdg-open.
+    Relative paths resolve against the instance's staging folder files/<N>/ (see list_files).
+    For BROWSER <input type=file> uploads use upload_file() instead. GTK apps get the same
+    X11 + D-Bus handling as launch_app (so they render on this display, not the host)."""
+    p = filepath if os.path.isabs(filepath) else os.path.join(_files_dir(instance), filepath)
+    if not os.path.exists(p):
+        return json.dumps({"error": f"file not found: {p}"})
+    if app:
+        appenv, args, _ = _app_env_args(instance, app)
+        args = args + [p]
+    else:
+        appenv, args = _env(instance), ["xdg-open", p]
+    subprocess.Popen(args, env=appenv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return json.dumps({"instance": instance, "opened": p, "app": app or "xdg-open"})
+
+
+@mcp.tool()
+def list_files(instance: int = 1) -> str:
+    """The instance's staging folder (files/<N>/ under the install dir) and its contents.
+    Drop files there (or reference any host path you can read) to open in apps via open_file()
+    or an app's Open dialog; browser uploads still go through upload_file()."""
+    d = _files_dir(instance)
+    try:
+        files = sorted(os.listdir(d))
+    except OSError:
+        files = []
+    return json.dumps({"instance": instance, "dir": d, "files": files})
 
 
 @mcp.tool()

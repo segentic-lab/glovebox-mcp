@@ -90,7 +90,9 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | `click(x,y)` · `move_mouse` · `scroll` · `drag` · `double_click` | Pointer ops. |
 | `type_text(text)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps). |
 | `press_keys("ctrl+a"/"Return"/…)` | Keys/combos (xdotool syntax). |
-| `upload_file(filepath, selector?)` | Attach a local file to a page's `<input type=file>` via the **Chrome DevTools Protocol**. The nested X11 file picker is invisible to automation **and hangs the renderer**, so use this for all uploads — never click an upload button expecting a dialog. Works on Chromium started by `launch_app`/`start-display.sh` (they open a per-instance `--remote-debugging-port`, `9222+N`). |
+| `upload_file(filepath, selector?)` | Attach a local file to a page's `<input type=file>` via the **Chrome DevTools Protocol**. The nested X11 file picker is invisible to automation **and hangs the renderer**, so use this for all uploads — never click an upload button expecting a dialog. Works on Chromium started by `launch_app`/`start-display.sh` (they open a per-instance `--remote-debugging-port`, `9222+N`). **Browser file inputs only** — for native apps see `open_file`. |
+| `open_file(filepath, app?)` | Open a local file in a **native** app on the instance's display (e.g. `app="gimp"`) or via `xdg-open`. GTK apps get the same X11/D-Bus handling as `launch_app`. |
+| `list_files()` | The instance's staging folder `files/<N>/` (under the install dir) + its contents. |
 | `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n)` | Multi-instance control (see below). |
 | `wait_ms(ms)` · `get_screen_size()` | Timing / sandbox size. |
 
@@ -130,6 +132,19 @@ The host display for new windows is `GLOVEBOX_HOST_DISPLAY` (default `:0`); `XAU
 the action returns its result **and** the resulting screen in a single call (with `settle_ms` to let the
 page update first) — no separate screenshot round-trip. Default `none` keeps routine steps cheap; opt
 into `screenshot`/`parse` on the steps that change the page (navigations, submits).
+
+### Files & uploads
+
+Each instance gets a staging folder **`files/<N>/`** inside the install dir — a stable place to drop
+files for that instance (readable by native apps and, since it's under `$HOME`, by snap Chromium too).
+`list_files(instance)` shows the folder and its contents.
+
+- **Browser** `<input type=file>` → **`upload_file(path, instance)`** (via CDP). The nested file
+  picker is invisible to automation and hangs snap Chromium, so never click an upload button expecting
+  a dialog.
+- **Native apps** (GIMP, Inkscape, editors) → **`open_file(path, instance, app="gimp")`**, or just
+  drive the app's own **Open dialog** — unlike the browser's, it's a real visible window you can type a
+  path into (`Ctrl+L` in a GTK file chooser).
 
 ## Maintenance (`local` mode)
 

@@ -53,10 +53,14 @@ happens inside a nested X11 window (an "instance"), isolated from the user's rea
 
 - **Typing** — `type_text` already handles unicode (č/š/ž…) by pasting non-ASCII via the clipboard.
   Just call it; don't type special characters key-by-key.
-- **File uploads** — NEVER click a page's "upload / choose file" button expecting a dialog. The
-  native file picker is invisible to you and **hangs the browser**. Use **`upload_file(path, instance)`**
-  instead. If the page inserts its `<input type=file>` only after you click an upload control, click
-  that control first (it won't open a visible dialog), then call `upload_file`.
+- **File uploads (browser)** — NEVER click a page's "upload / choose file" button expecting a dialog.
+  The native file picker is invisible to you and **hangs the browser**. Use **`upload_file(path,
+  instance)`** instead. If the page inserts its `<input type=file>` only after you click an upload
+  control, click that control first (it won't open a visible dialog), then call `upload_file`.
+- **Files for native apps** — each instance has a staging folder (`list_files(instance)` shows it;
+  `files/<N>/` under the install dir). Open a file in a native app with **`open_file(path, instance,
+  app="gimp")`**, or drive the app's own Open dialog — that one *is* visible, so type the path (`Ctrl+L`
+  in a GTK file chooser).
 - **Browser navigation** — `press_keys("ctrl+l")` → `press_keys("ctrl+a")` →
   `type_text("https://…")` → `press_keys("Return")`. New tab: `press_keys("ctrl+t")`.
 - **Multi-instance / parallel** — for independent tasks, `launch_app` a new instance and pass its id
