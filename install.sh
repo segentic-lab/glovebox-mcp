@@ -83,4 +83,19 @@ PYP
 fi
 
 echo "$MODE" > .vision-mode
-echo "✓ Done. Vision mode = $MODE (.vision-mode). Restart your MCP client to apply."
+
+# ---- write a ready-to-use MCP client config with the real install path ----
+cat > mcp-config.json <<EOF
+{
+  "mcpServers": {
+    "glovebox": {
+      "command": "$DIR/.venv/bin/python",
+      "args": ["$DIR/server.py"],
+      "env": { "DISPLAY": ":1" }
+    }
+  }
+}
+EOF
+
+echo "✓ Done. Vision mode = $MODE. Wrote mcp-config.json (paths → $DIR)."
+echo "  Add its \"glovebox\" block to your MCP client config, then restart the client."

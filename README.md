@@ -67,11 +67,12 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
    ./start-display.sh 1920x1080    # …or pass a screen size (or set $RES)
    ```
    Log into any sites or apps you want to automate **in that window**.
-2. **Register the server** with your MCP client (see `mcp-config.json`, point the paths at this repo):
+2. **Register the server** with your MCP client. `install.sh` already wrote **`mcp-config.json`** with
+   your real install path — copy its `glovebox` block into your client's MCP config:
    ```jsonc
    { "mcpServers": { "glovebox": {
-       "command": "/absolute/path/to/glovebox-mcp/.venv/bin/python",
-       "args":    ["/absolute/path/to/glovebox-mcp/server.py"],
+       "command": "/abs/path/to/glovebox-mcp/.venv/bin/python",   // filled in by install.sh
+       "args":    ["/abs/path/to/glovebox-mcp/server.py"],
        "env":     { "DISPLAY": ":1" }
    } } }
    ```
