@@ -20,15 +20,27 @@ if [[ "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
   exit 1
 fi
 
-# ---- system packages (sudo; printed, not run) ----
+# ---- system packages (Xephyr etc. — auto-installed via apt when missing) ----
 APT_COMMON="xserver-xephyr openbox scrot x11-utils xdotool wmctrl xclip"
 APT_MODE=""; [[ "$MODE" == "basic" ]] && APT_MODE="tesseract-ocr tesseract-ocr-slv"
-echo "▶ System packages for mode '$MODE' (run if missing):"
-echo "    sudo apt-get install -y $APT_COMMON $APT_MODE"
+NEED="$APT_COMMON $APT_MODE"
 MISS=""
-for b in Xephyr xdotool; do command -v "$b" >/dev/null 2>&1 || MISS="$MISS $b"; done
+for b in Xephyr openbox xdotool wmctrl xclip xdpyinfo; do command -v "$b" >/dev/null 2>&1 || MISS="$MISS $b"; done
 [[ "$MODE" == "basic" ]] && { command -v tesseract >/dev/null 2>&1 || MISS="$MISS tesseract"; }
-[[ -n "$MISS" ]] && echo "  ⚠ missing:$MISS — run the apt line above, then re-run this script."
+if [[ -n "$MISS" ]]; then
+  echo "▶ Missing system tools:$MISS"
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "  Installing them with apt (needs sudo) …"
+    sudo apt-get install -y $NEED || {
+      echo "✗ apt install failed — run it yourself, then re-run this script:"
+      echo "    sudo apt-get install -y $NEED"; exit 1; }
+  else
+    echo "✗ No apt-get on this system. Install these packages with your package manager, then re-run:"
+    echo "    $NEED"; exit 1
+  fi
+else
+  echo "▶ System tools present (Xephyr, openbox, xdotool, wmctrl, xclip) ✓"
+fi
 
 # ---- python env ----
 [[ -d .venv ]] || uv venv --python 3.12 .venv

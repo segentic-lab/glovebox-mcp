@@ -27,8 +27,9 @@ that window*, and the agent operates only there — you can watch it live and cl
 - **Linux** — the sandbox nests a real X server (Xephyr), so it works even on **Wayland** hosts
   (via Xwayland). Not macOS/Windows. Developed on Ubuntu; any modern Linux with the packages below.
 - **Python 3.10+** and [`uv`](https://docs.astral.sh/uv/) (used for the virtualenv).
-- **System packages** (the installer prints the exact `apt` line): `xserver-xephyr openbox scrot
-  x11-utils xdotool wmctrl xclip` — plus `tesseract-ocr` for `basic` mode.
+- **System packages** — `xserver-xephyr` (Xephyr), `openbox`, `scrot`, `x11-utils`, `xdotool`,
+  `wmctrl`, `xclip` (+ `tesseract-ocr` for `basic`). On Debian/Ubuntu the installer **auto-installs**
+  these via `apt` (sudo) when missing; on other distros it lists them and asks you to install first.
 - A **browser** in the sandbox (Chromium or Chrome).
 - **NVIDIA GPU (≥6 GB VRAM)** — only for the `local` vision mode.
 
