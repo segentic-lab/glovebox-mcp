@@ -20,26 +20,28 @@ if [[ "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
   exit 1
 fi
 
-# ---- system packages (Xephyr etc. — auto-installed via apt when missing) ----
-APT_COMMON="xserver-xephyr openbox scrot x11-utils xdotool wmctrl xclip"
-APT_MODE=""; [[ "$MODE" == "basic" ]] && APT_MODE="tesseract-ocr tesseract-ocr-slv"
-NEED="$APT_COMMON $APT_MODE"
+# ---- system packages — auto via apt (Debian/Ubuntu); guided elsewhere (the server is distro-agnostic) ----
+APT_PKGS="xserver-xephyr openbox scrot x11-utils xdotool wmctrl xclip"
+[[ "$MODE" == "basic" ]] && APT_PKGS="$APT_PKGS tesseract-ocr tesseract-ocr-slv"
+TESS=""; [[ "$MODE" == "basic" ]] && TESS=" tesseract"
 MISS=""
 for b in Xephyr openbox xdotool wmctrl xclip xdpyinfo; do command -v "$b" >/dev/null 2>&1 || MISS="$MISS $b"; done
 [[ "$MODE" == "basic" ]] && { command -v tesseract >/dev/null 2>&1 || MISS="$MISS tesseract"; }
-if [[ -n "$MISS" ]]; then
-  echo "▶ Missing system tools:$MISS"
-  if command -v apt-get >/dev/null 2>&1; then
-    echo "  Installing them with apt (needs sudo) …"
-    sudo apt-get install -y $NEED || {
-      echo "✗ apt install failed — run it yourself, then re-run this script:"
-      echo "    sudo apt-get install -y $NEED"; exit 1; }
-  else
-    echo "✗ No apt-get on this system. Install these packages with your package manager, then re-run:"
-    echo "    $NEED"; exit 1
-  fi
-else
+if [[ -z "$MISS" ]]; then
   echo "▶ System tools present (Xephyr, openbox, xdotool, wmctrl, xclip) ✓"
+elif command -v apt-get >/dev/null 2>&1; then
+  echo "▶ Missing:$MISS — installing via apt (needs sudo) …"
+  sudo apt-get install -y $APT_PKGS || {
+    echo "✗ apt failed — run it yourself, then re-run: sudo apt-get install -y $APT_PKGS"; exit 1; }
+elif command -v dnf >/dev/null 2>&1; then
+  echo "▶ Missing:$MISS — install with dnf, then re-run this script:"
+  echo "    sudo dnf install -y xorg-x11-server-Xephyr openbox scrot xorg-x11-utils xdotool wmctrl xclip$TESS"; exit 1
+elif command -v pacman >/dev/null 2>&1; then
+  echo "▶ Missing:$MISS — install with pacman, then re-run this script:"
+  echo "    sudo pacman -S --needed xorg-server-xephyr openbox scrot xorg-xdpyinfo xdotool wmctrl xclip$TESS"; exit 1
+else
+  echo "▶ Missing:$MISS — install these tools with your package manager, then re-run:"
+  echo "    Xephyr, openbox, scrot, xdpyinfo (x11-utils), xdotool, wmctrl, xclip$TESS"; exit 1
 fi
 
 # ---- python env ----

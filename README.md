@@ -29,7 +29,8 @@ that window*, and the agent operates only there — you can watch it live and cl
 - **Python 3.10+** and [`uv`](https://docs.astral.sh/uv/) (used for the virtualenv).
 - **System packages** — `xserver-xephyr` (Xephyr), `openbox`, `scrot`, `x11-utils`, `xdotool`,
   `wmctrl`, `xclip` (+ `tesseract-ocr` for `basic`). On Debian/Ubuntu the installer **auto-installs**
-  these via `apt` (sudo) when missing; on other distros it lists them and asks you to install first.
+  them via `apt` (sudo); on Fedora/Arch it prints the matching `dnf`/`pacman` command. The MCP server
+  itself is distro-agnostic — any Linux with these tools works.
 - A **browser** in the sandbox (Chromium or Chrome).
 - **NVIDIA GPU (≥6 GB VRAM)** — only for the `local` vision mode.
 
