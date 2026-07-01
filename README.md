@@ -36,21 +36,27 @@ that window*, and the agent operates only there — you can watch it live and cl
 
 ## Install
 
-Clone, then run the installer for the vision backend you want. It prints the one `sudo apt-get …`
-line the X11 sandbox needs, then installs the Python deps for that mode:
+Pick a vision backend and run its one-liner (clone → install). Each one installs the system packages
+(auto via `apt` on Debian/Ubuntu) and the Python deps for that mode, and writes a ready-to-paste
+`mcp-config.json` with your paths.
+
+**`none`** — no local models; your agent reads screenshots itself (lightest, instant):
 
 ```bash
-git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp
-
-./install.sh none      # no local models — your agent reads screenshots itself (lightest, instant)
-./install.sh basic     # Tesseract OCR grounding — text + coordinates, CPU-only
-./install.sh local     # OmniParser grounding on an NVIDIA GPU — text + icons (~4 GB weights)
+git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh none
 ```
 
-- **none** — no local grounding model; the agent's own multimodal vision reads the screenshots.
-- **basic** — Tesseract OCR: `parse_screen` returns text elements + coordinates (CPU-only).
-- **local** — OmniParser on the GPU: `parse_screen` returns text **+ icons** with pixel-precise boxes.
-  Best grounding; preflights CUDA + ≥6 GB VRAM and downloads ~4 GB of weights.
+**`basic`** — Tesseract OCR grounding (`parse_screen` → text + coordinates, CPU-only):
+
+```bash
+git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh basic
+```
+
+**`local`** — OmniParser on an NVIDIA GPU (`parse_screen` → text **+ icons**, pixel-precise; ~4 GB weights, ≥6 GB VRAM):
+
+```bash
+git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh local
+```
 
 Your choice is written to `.vision-mode` (override per run with the `GLOVEBOX_VISION` env var).
 
