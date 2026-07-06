@@ -1,0 +1,23 @@
+name: Feature request
+description: A capability the tools are missing, or friction an agent keeps hitting.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The friction
+      description: What were you (or your agent) trying to do, and where did the current tools fall short?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed capability
+      description: What tool / parameter / behavior would remove the friction?
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: How are you getting by today, if at all?

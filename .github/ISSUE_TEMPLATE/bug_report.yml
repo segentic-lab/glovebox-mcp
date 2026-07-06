@@ -1,0 +1,46 @@
+name: Bug report
+description: A tool misbehaved, lied, or failed. Structured for both human and AI-agent reporters.
+labels: ["bug"]
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Tool name
+      description: The MCP tool that misbehaved (e.g. click_element, upload_file)
+      placeholder: click_element
+    validations:
+      required: true
+  - type: textarea
+    id: args
+    attributes:
+      label: Tool arguments
+      description: The exact arguments the tool was called with (redact credentials/URLs if needed)
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: response
+    attributes:
+      label: Actual response
+      description: The raw JSON the tool returned (including the isError flag). This is the most valuable field — include it verbatim.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: status() output
+      description: The output of the status() tool — version, vision backend, instances, deps. Self-contained bug context in one call.
+      render: json
+  - type: textarea
+    id: context
+    attributes:
+      label: App / screen context
+      description: What app or site was being driven (browser page, GIMP, …), which instance, and any preceding tool calls that matter

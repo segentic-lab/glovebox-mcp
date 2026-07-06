@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.segentic-lab/glovebox-mcp",
+  "description": "Sandboxed computer-use for AI agents: drive real browser + desktop apps in nested X11 windows — 19 tools, parallel instances, selectable vision grounding",
+  "repository": {
+    "url": "https://github.com/segentic-lab/glovebox-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "websiteUrl": "https://github.com/segentic-lab/glovebox-mcp"
+}
