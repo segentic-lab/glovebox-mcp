@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install X stack (Xvfb hosts :99; launch_app nests Xephyr inside it)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xserver-xephyr xdotool x11-utils xclip openbox wmctrl
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+      - name: Compile check
+        run: python -m compileall -q server.py _version.py
+      - name: Run tests (smoke + display e2e)
+        run: pytest -v

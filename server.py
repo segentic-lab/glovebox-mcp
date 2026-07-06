@@ -352,7 +352,8 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
         _fail("launch_app", f"Xephyr {_disp(n)} did not start",
               fix=f"check that the host display {HOST} is reachable (GLOVEBOX_HOST_DISPLAY) and Xephyr is installed",
               instance=n)
-    subprocess.Popen(["openbox"], env=_env(n), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if shutil.which("openbox"):   # window manager is a nicety — apps still render without one
+        subprocess.Popen(["openbox"], env=_env(n), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
     appenv, args, base = _app_env_args(n, command)
     applog = f"/tmp/glovebox_app_{n}.log"   # app stderr — read back if it dies on the spot
