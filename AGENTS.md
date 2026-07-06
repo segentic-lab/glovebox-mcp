@@ -8,6 +8,15 @@ It teaches the agent how to drive the sandbox well and avoid the traps.
 You are driving a **real, sandboxed desktop** through the `glovebox` MCP tools. Everything you do
 happens inside a nested X11 window (an "instance"), isolated from the user's real screen and files.
 
+## Responses: read `ok` and `fix`
+
+Every tool returns JSON: `{"ok": true, "action": …, "instance": …, …}`. When a call fails, the
+result is flagged as an error and contains `{"ok": false, "error": …, "fix": …}` — **`fix` names
+the exact call that unblocks you** (re-run `parse_screen`, check `list_instances`, etc.). Follow it
+instead of retrying blindly. The server never reports success for something that didn't happen: a
+dead instance, an unknown element id, an invalid key name, a zero scroll all come back as errors.
+Start with `status()` to see the vision backend, live instances, and installed deps in one call.
+
 ## Mental model
 
 - Each **instance** (`instance=N`, default `1`) is one app window on its own display. You **cannot
@@ -38,6 +47,7 @@ happens inside a nested X11 window (an "instance"), isolated from the user's rea
 
 | Goal | Call |
 |---|---|
+| Orient: version, vision mode, instances, deps | `status()` |
 | See the screen | `screenshot(instance)` |
 | List elements + coords | `parse_screen(instance)` → `click_element(id, instance)` |
 | Click a known pixel | `click(x, y, instance, observe="screenshot")` |

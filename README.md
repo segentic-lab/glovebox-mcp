@@ -94,7 +94,8 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 
 | Tool | What |
 |---|---|
-| `parse_screen()` | Vision grounding → JSON of every element (id, type, label, interactive, pixel-center) + a numbered Set-of-Mark image at `/tmp/glovebox_annotated.png`. (`local` mode: OmniParser on GPU, ~2 s.) |
+| `status()` | Server + sandbox status in one read-only call: version, vision backend, host display, live instances, and which system deps (xdotool, xclip, Xephyr, tesseract, OmniParser weights) are present. Run it first — and paste it into bug reports. |
+| `parse_screen()` | Vision grounding → JSON of detected elements (id, type, label, interactive, pixel-center; capped at 300 per call, flagged via `"truncated"`) + a numbered Set-of-Mark image at `/tmp/glovebox_annotated_<N>.png`. (`local` mode: OmniParser on GPU, ~2 s.) |
 | `click_element(id)` | Click an element from the last `parse_screen` (no coordinate guessing). |
 | `screenshot()` | Screenshot of an instance. |
 | `click(x,y)` · `move_mouse` · `scroll` · `drag` · `double_click` | Pointer ops. |
@@ -108,6 +109,17 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 
 Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** (see below).
 In `local` mode OmniParser is **lazy-loaded** on first `parse_screen` (~6 s once, then ~2 s/parse).
+
+### Structured, honest responses
+
+Every tool returns JSON: `{"ok": true, "action": "click", "instance": 1, "detail": "clicked (10,20) button 1", …}`.
+Failures come back with the MCP `isError` flag set and the same JSON shape embedded in the error
+text — `{"ok": false, "error": "…", "fix": "…"}` — where **`fix` names the call that unblocks you**
+(e.g. a click on a dead instance says to run `list_instances()` / `launch_app()`; an unknown element
+id says to re-run `parse_screen()`). Silent no-ops are treated as failures too: an invalid keysym,
+a zero scroll, closing an instance that isn't running, or non-ASCII typing without `xclip` all
+error instead of pretending success. `screenshot()` returns a PNG image; `observe="screenshot"|"parse"`
+returns `[json, image]` in one call.
 
 ### Vision backend (selectable)
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glovebox-mcp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Sandboxed computer-use MCP — drive a real browser + desktop apps in a nested X11 window."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,6 +38,8 @@ dependencies = [
 [project.optional-dependencies]
 # 'basic' vision — Tesseract OCR grounding (CPU).
 basic = ["pytesseract"]
+# tests (see tests/ and .github/workflows/ci.yml)
+dev = ["pytest", "pytest-asyncio"]
 # 'local' vision — OmniParser grounding (GPU). transformers pinned for Florence-2.
 local = [
   "torch",
@@ -58,4 +60,9 @@ local = [
 Repository = "https://github.com/segentic-lab/glovebox-mcp"
 
 [tool.setuptools]
-py-modules = ["server"]
+py-modules = ["server", "_version"]
+
+[tool.setuptools.dynamic]
+# single source of truth: _version.py (reported to MCP clients in the initialize handshake)
+version = { attr = "_version.__version__" }
+
