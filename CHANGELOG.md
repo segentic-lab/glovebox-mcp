@@ -8,6 +8,22 @@ reported to MCP clients during the initialize handshake.
 
 ## [0.4.0] - Unreleased
 
+### Added
+- **Shared vision service** (`vision_service.py`): in `local` mode OmniParser
+  is loaded by ONE process per machine and served over a Unix socket, instead
+  of every agent's server loading YOLO + Florence-2 + easyocr into the GPU
+  again (1.5–2.5 GB and a CUDA context each). The first `parse_screen` starts
+  it under a cross-process lock; parses are serialized on the GPU and the
+  result carries `"via": "service"`, `queued_ms` and `parse_ms`; it exits
+  after `GLOVEBOX_VISION_IDLE_MIN` (15) idle minutes. Unreachable or
+  un-startable → the server parses in-process as before (`"via":
+  "in-process"`, re-tried after 60 s). Parser errors (GPU too small, out of
+  memory) cross the wire as the same structured `{error, fix}`. `status()`
+  reports it under `vision.omniparser.service`; `GLOVEBOX_VISION_SERVICE=0`
+  disables it; `python vision_service.py status|stop`. 10 tests cover framing,
+  lifecycle (spawn once, reuse, idle-exit, shutdown), error propagation and
+  the server's client/fallback paths without a GPU (`--fake` parser).
+
 ### Changed
 - **MCP Python SDK 2.x** (`mcp[cli]>=2.0,<3`; 1.x is no longer supported).
   `FastMCP` → `MCPServer("glovebox", version=…)`, which also retires the

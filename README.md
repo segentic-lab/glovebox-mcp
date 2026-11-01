@@ -149,6 +149,13 @@ reported as such.
 | `basic` | Tesseract OCR → text **lines** + coords (+ confidence) | `tesseract-ocr` + `pytesseract` | no GPU; text-only grounding |
 | `local` | OmniParser → text **+ icons** + coords | torch + CUDA + OmniParser weights + NVIDIA GPU ≥ 6 GB | best grounding |
 
+In `local` mode the models are loaded by **one shared vision-service process per machine**
+(`vision_service.py`), not by every agent's server: the first `parse_screen` starts it, parallel
+agents queue on it (`queued_ms` in the result), and it exits after 15 idle minutes so a forgotten
+service never pins the GPU. If it can't be reached the server loads the models in-process instead —
+the service is an optimization, never a new failure mode. `status()` shows it under
+`vision.omniparser.service`; `python vision_service.py status|stop` from the shell.
+
 An explicitly requested `basic`/`local` that is not usable **fails `parse_screen` with the fix named**
 (OmniParser not installed, no/too-small GPU, GPU out of memory, missing tesseract language data) —
 it never silently falls back; only `auto` does, and it says so. Tesseract languages default to
@@ -168,8 +175,8 @@ each its own Xephyr display/window on the host desktop:
 
 Because each display has its **own cursor**, multiple agents can drive different instances **in parallel** —
 one window each. Each agent's server process allocates display numbers under a **cross-process lock**,
-so simultaneous launches don't collide. The only shared resource is the GPU for `local`-mode
-`parse_screen` (it just queues). The host display for new windows is `GLOVEBOX_HOST_DISPLAY`
+so simultaneous launches don't collide. The GPU is shared through the vision service (one model
+load, requests queue; see above). The host display for new windows is `GLOVEBOX_HOST_DISPLAY`
 (default `:0`); `XAUTHORITY` is auto-discovered. Instances **outlive the server process** by default
 (another agent or session can pick them up via `list_instances`); set `GLOVEBOX_CLEANUP_ON_EXIT=1` to
 close the ones a server launched when it exits.
@@ -208,6 +215,9 @@ in-progress downloads.
 | `GLOVEBOX_HOST_DISPLAY` | `:0` | host display where new Xephyr windows appear |
 | `GLOVEBOX_CLEANUP_ON_EXIT` | off | `1` → close the instances this server launched when it exits |
 | `GLOVEBOX_TESS_LANG` | `slv+eng` ∩ installed | tesseract language string for `basic` |
+| `GLOVEBOX_VISION_SERVICE` | `1` | `local` mode parses through the shared per-machine service; `0` = load models in every server process |
+| `GLOVEBOX_VISION_SOCKET` | `$XDG_RUNTIME_DIR/glovebox-vision.sock` | the service's Unix socket |
+| `GLOVEBOX_VISION_IDLE_MIN` | `15` | the service exits after this many idle minutes |
 | `GLOVEBOX_OCR_SCALE` | `2` | upscale factor before OCR in `basic` (1–4); UI text is too small for tesseract at 1x |
 | `DISPLAY` | `:1` | instance 1's display (set by `mcp-config.json`) |
 
@@ -239,6 +249,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 
 - `server.py` — the MCP server (all 23 tools).
 - `vision.py` — vision backends: selection rules, GPU preflight, tesseract grouping, OmniParser lifecycle (`check` / `install-omniparser` CLI).
+- `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
 - `install.sh` — mode-aware installer (`none` / `basic` / `local`).
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
 - `AGENTS.md` — drop-in tool-usage instructions for the AI agent (paste into its system prompt).

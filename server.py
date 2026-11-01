@@ -13,6 +13,9 @@ Input is unicode-safe (xdotool); screenshots via mss; grounding backend is selec
   GLOVEBOX_CLEANUP_ON_EXIT = 1                    (close the instances THIS process launched when it exits;
                                                    default off — instances outlive the server so another
                                                    agent/session can pick them up)
+  GLOVEBOX_VISION_SERVICE = 1                     (local mode: parse through ONE shared OmniParser process
+                                                   per machine instead of loading the models in every agent's
+                                                   server; 0 = always in-process. See vision_service.py)
 
 Response contract: every tool returns JSON — {"ok": true, "action": ..., "instance": ..., ...} on
 success. Failures raise ToolError, so the client sees isError=true with the same JSON shape
@@ -50,6 +53,7 @@ import mss
 from PIL import Image, ImageChops, ImageDraw
 
 import vision
+import vision_service
 from _version import __version__
 
 # MCP SDK 2.x: the project version goes straight into the initialize handshake. Sync tool
@@ -78,7 +82,27 @@ BROWSERS = ("chromium", "chromium-browser", "chrome", "google-chrome", "google-c
             "vivaldi-stable", "opera")
 
 VISION = vision.resolve()          # {requested, effective, ready, reason, fallback}
-_OMNI = vision.OmniParser()
+_OMNI = vision.OmniParser()        # in-process fallback when the shared service is unavailable
+USE_SERVICE = os.environ.get("GLOVEBOX_VISION_SERVICE", "1").strip().lower() not in ("0", "false", "no", "off")
+_SERVICE_FAILED_AT = [0.0]         # back off re-spawn attempts after a failure
+
+
+def _parse_local(img, box_threshold, ann, instance):
+    """OmniParser via the shared vision service (one GPU load per machine, see vision_service.py);
+    falls back to loading the models in THIS process when the service can't be reached or started.
+    Returns (elements, meta) — meta says which path answered and how long it queued."""
+    if USE_SERVICE and time.time() - _SERVICE_FAILED_AT[0] > 60:
+        try:
+            if vision_service.ensure_running() is not None:
+                elems, meta = vision_service.parse(img, box_threshold, ann, instance)
+                return elems, {"via": "service", **meta}
+            _SERVICE_FAILED_AT[0] = time.time()
+        except vision.VisionError:
+            raise                      # a real parse/preflight error from the service — report it
+        except (OSError, ValueError, ConnectionError):
+            _SERVICE_FAILED_AT[0] = time.time()   # unreachable: fall through to in-process
+    elems = _OMNI.parse(img, box_threshold, ann)
+    return elems, {"via": "in-process"}
 
 
 def _truthy(v) -> bool:
@@ -650,7 +674,8 @@ def _do_parse(instance: int = 1, box_threshold: float = 0.05, granularity: str =
             elems, boxes = vision.parse_tesseract(img, granularity)
             _annotate(img, elems, boxes, ann)
         else:
-            elems = _OMNI.parse(img, box_threshold, ann)
+            elems, meta = _parse_local(img, box_threshold, ann, instance)
+            base.update(meta)
     except vision.VisionError as e:
         _fail("parse_screen", e.error, fix=e.fix, instance=instance, vision=mode)
     _LAST[int(instance)] = {e["id"]: tuple(e["center"]) for e in elems}
@@ -711,7 +736,9 @@ def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: st
     "elements": [{id, type, label, interactive, center: [x,y]}, …]} — then click_element(id).
     Also saves a numbered Set-of-Mark image (path in "annotated").
     Backend = the effective GLOVEBOX_VISION: 'local' (OmniParser on the GPU, text + icons, ~2 s
-    after a ~6 s first-call model load), 'basic' (tesseract, text only; granularity='line'
+    after a ~6 s first-call model load; served by ONE shared vision-service process per machine so
+    parallel agents don't each load the models — "via": "service"|"in-process", "queued_ms" says
+    how long the GPU queue was), 'basic' (tesseract, text only; granularity='line'
     merges words on one line into one target like "Sign in" — default — or 'word' for single
     words; the frame is OCR'd at 2× (GLOVEBOX_OCR_SCALE) because UI text is too small for
     tesseract at 1×; each element also carries "confidence" 0–100), 'none' (returns a note telling you to
@@ -1160,7 +1187,9 @@ def status() -> str:
 
     Returns {"ok", "version", "host_display", "tmp_dir", "cleanup_on_exit",
     "vision": {requested, effective, ready, reason, fallback, gpu: {present, name, vram_total_mb,
-    vram_free_mb, enough, note}, omniparser: {code, weights, torch, ready, reason, loaded},
+    vram_free_mb, enough, note}, omniparser: {code, weights, torch, ready, reason, loaded,
+    service: {running, pid, loaded, served, in_flight, idle_s, …} — the shared per-machine
+    OmniParser process (one GPU load for all agents; starts on first use, idle-exits)},
     tesseract: {binary, pytesseract, langs, lang, ready, reason}},
     "instances": [...same as list_instances], "deps": {xdotool, xclip, xephyr, openbox, wmctrl,
     xdpyinfo, dbus_run_session, tesseract, nvidia_smi: true|false}}.
@@ -1172,6 +1201,11 @@ def status() -> str:
     omni["loaded"] = _OMNI.loaded
     if _OMNI.load_seconds is not None:
         omni["load_seconds"] = _OMNI.load_seconds
+    svc = vision_service.ping() if USE_SERVICE else None
+    omni["service"] = svc or {"running": False, "socket": vision_service.socket_path(),
+                              "enabled": USE_SERVICE,
+                              "note": "starts on the first local-mode parse_screen" if USE_SERVICE
+                                      else "disabled (GLOVEBOX_VISION_SERVICE=0): models load per server process"}
     tess = vision.tesseract_info()
     deps = {k: bool(shutil.which(b)) for k, b in (
         ("xdotool", "xdotool"), ("xclip", "xclip"), ("xephyr", "Xephyr"), ("openbox", "openbox"),

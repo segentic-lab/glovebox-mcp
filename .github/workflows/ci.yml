@@ -25,7 +25,7 @@ jobs:
       - name: Install package + dev deps (+ basic vision so the OCR path is tested)
         run: pip install -e ".[dev,basic]"
       - name: Compile check
-        run: python -m compileall -q server.py vision.py _version.py
+        run: python -m compileall -q server.py vision.py vision_service.py _version.py
       - name: Vision self-check (no GPU here -> must resolve to basic, not crash)
         run: python vision.py check
       - name: Run tests (smoke + display e2e)

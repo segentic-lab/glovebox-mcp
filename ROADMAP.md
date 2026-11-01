@@ -19,9 +19,13 @@ including the error paths (`ToolError` → `isError`) and `[json, image]` return
 semantic change — sync tools run on a worker thread, so calls can overlap — is covered by a
 concurrency e2e and the existing locks. Python 3.10 stays supported.
 
-## 0.4.x — shared vision service (one GPU load for the whole fleet)
+## 0.4.0 — shared vision service (done 2026-11-01, unreleased)
 
-Today OmniParser is loaded **per server process**, and every agent runs its own server process
+Implemented as planned below (`vision_service.py`, 10 GPU-less tests via a fake parser). Still a
+manual check: the real-GPU path on a multi-agent run — `status().vision.omniparser.service.served`
+should climb while `vram_free_mb` stays flat as agents are added.
+
+Original plan — before 0.4.0 OmniParser was loaded **per server process**, and every agent runs its own server process
 over stdio. One agent driving three instances loads the models once; three agents in `local`
 mode load them three times (roughly 1.5–2.5 GB VRAM each, plus a CUDA context apiece). The
 0.3.0 preflight makes the third agent fail honestly instead of crashing, but it does not make
@@ -43,7 +47,7 @@ Unix socket (`$XDG_RUNTIME_DIR/glovebox-vision.sock`); the server processes beco
 - **Tests**: service start/stop/idle-exit and the protocol round-trip run without a GPU by
   mocking the parser; the real-GPU path stays a manual check (CI has no GPU).
 
-Ordering: next up (the MCP SDK 2.x migration landed first because it was mechanical).
+Ordering: landed right after the MCP SDK 2.x migration, both in 0.4.0.
 
 ## 0.4.x — candidates, not yet committed
 
