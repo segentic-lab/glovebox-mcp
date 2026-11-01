@@ -211,6 +211,9 @@ def test_group_tesseract_lines_and_words():
     assert elems[0]["confidence"] == 88
     elems, _ = vision.group_tesseract(data, "word")
     assert [e["label"] for e in elems] == ["Sign", "in"]
+    # boxes from a 2x-upscaled OCR pass are mapped back to screen pixels
+    elems, boxes = vision.group_tesseract(data, "line", scale=2.0)
+    assert boxes[0] == (5, 5, 33, 11) and elems[0]["center"] == [19, 8]
 
 
 def test_vision_error_becomes_structured_failure(monkeypatch):

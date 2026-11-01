@@ -710,7 +710,8 @@ def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: st
     Backend = the effective GLOVEBOX_VISION: 'local' (OmniParser on the GPU, text + icons, ~2 s
     after a ~6 s first-call model load), 'basic' (tesseract, text only; granularity='line'
     merges words on one line into one target like "Sign in" — default — or 'word' for single
-    words; each element also carries "confidence" 0–100), 'none' (returns a note telling you to
+    words; the frame is OCR'd at 2× (GLOVEBOX_OCR_SCALE) because UI text is too small for
+    tesseract at 1×; each element also carries "confidence" 0–100), 'none' (returns a note telling you to
     screenshot + reason about pixels yourself — this is normal, not an error; status() says why
     if 'auto' fell back to it). Fails (isError) with the fix named when an explicitly requested
     backend is not usable (OmniParser not installed, no/too-small GPU, GPU out of memory,

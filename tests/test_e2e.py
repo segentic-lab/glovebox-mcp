@@ -72,7 +72,8 @@ def xmessage_window(x99):
     """A real window with text on :99 (OCR target, window_info target)."""
     if not HAS_XMESSAGE:
         pytest.skip("xmessage not installed")
-    p = subprocess.Popen(["xmessage", "-center", "Sign in to continue"], env=XENV,
+    # -fn 10x20: a bitmap font from xfonts-base (CI has no scalable fonts; the 6x13 fallback is unreadable)
+    p = subprocess.Popen(["xmessage", "-fn", "10x20", "-center", "Sign in to continue"], env=XENV,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.8)
     yield p

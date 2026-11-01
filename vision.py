@@ -43,6 +43,7 @@ MIN_VRAM_MB = 6000        # OmniParser (YOLO + Florence-2) needs ~6 GB; below th
 TIGHT_VRAM_MB = 8000      # works, but close other GPU apps
 MIN_FREE_VRAM_MB = 4500   # free memory needed at model-load time
 OCR_MIN_CONF = 45         # tesseract word confidence floor
+OCR_SCALE_DEFAULT = 2.0   # UI text is ~12-16 px; tesseract wants ~2x that (measured: 1x found nothing, 2x read it at 96%)
 DEFAULT_TESS_LANGS = ("slv", "eng")
 
 
@@ -193,9 +194,18 @@ def resolve(requested: str = None, omni: dict = None, tess: dict = None) -> dict
 
 
 # ---------- tesseract backend ----------
-def group_tesseract(data: dict, granularity: str = "line", min_conf: int = OCR_MIN_CONF):
+def ocr_scale() -> float:
+    """Upscale factor applied before OCR (GLOVEBOX_OCR_SCALE, 1-4, default 2)."""
+    try:
+        return max(1.0, min(float(os.environ.get("GLOVEBOX_OCR_SCALE", OCR_SCALE_DEFAULT)), 4.0))
+    except ValueError:
+        return OCR_SCALE_DEFAULT
+
+
+def group_tesseract(data: dict, granularity: str = "line", min_conf: int = OCR_MIN_CONF, scale: float = 1.0):
     """Turn pytesseract image_to_data output into elements. 'line' merges words that tesseract
     put on the same line ("Sign" + "in" -> "Sign in", one target); 'word' keeps single words.
+    `scale` is the upscale factor the image was OCR'd at; boxes are mapped back to screen pixels.
     Returns (elems, boxes) with ids assigned in reading order."""
     groups = {}
     order = []
@@ -208,7 +218,7 @@ def group_tesseract(data: dict, granularity: str = "line", min_conf: int = OCR_M
             conf = -1
         if not txt or conf < min_conf:
             continue
-        x, y, w, h = int(data["left"][i]), int(data["top"][i]), int(data["width"][i]), int(data["height"][i])
+        x, y, w, h = (int(round(int(data[k][i]) / scale)) for k in ("left", "top", "width", "height"))
         key = (i,) if granularity == "word" else (data["block_num"][i], data["par_num"][i], data["line_num"][i])
         if key not in groups:
             groups[key] = {"words": [], "confs": [], "box": [x, y, x + w, y + h]}
@@ -238,6 +248,10 @@ def parse_tesseract(img, granularity: str = "line"):
         raise VisionError("pytesseract is not installed",
                           "pip install pytesseract (or ./install.sh basic), or set GLOVEBOX_VISION=none")
     lang = tesseract_lang_string()
+    scale = ocr_scale()
+    if scale != 1.0:
+        from PIL import Image
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
     try:
         data = pytesseract.image_to_data(img, lang=lang, output_type=Output.DICT)
     except pytesseract.TesseractNotFoundError:
@@ -247,7 +261,7 @@ def parse_tesseract(img, granularity: str = "line"):
         raise VisionError(f"tesseract failed (lang={lang}): {str(e)[:200]}",
                           "install the language data (apt install tesseract-ocr-<lang>) or set "
                           "GLOVEBOX_TESS_LANG to an installed language (`tesseract --list-langs`)")
-    return group_tesseract(data, granularity)
+    return group_tesseract(data, granularity, scale=scale)
 
 
 # ---------- OmniParser backend ----------

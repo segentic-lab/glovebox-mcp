@@ -208,6 +208,7 @@ in-progress downloads.
 | `GLOVEBOX_HOST_DISPLAY` | `:0` | host display where new Xephyr windows appear |
 | `GLOVEBOX_CLEANUP_ON_EXIT` | off | `1` → close the instances this server launched when it exits |
 | `GLOVEBOX_TESS_LANG` | `slv+eng` ∩ installed | tesseract language string for `basic` |
+| `GLOVEBOX_OCR_SCALE` | `2` | upscale factor before OCR in `basic` (1–4); UI text is too small for tesseract at 1x |
 | `DISPLAY` | `:1` | instance 1's display (set by `mcp-config.json`) |
 
 ## Maintenance (`local` mode)

@@ -21,7 +21,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xserver-xephyr xdotool x11-utils xclip openbox wmctrl tesseract-ocr
+            xvfb xserver-xephyr xdotool x11-utils xclip openbox wmctrl tesseract-ocr xfonts-base
       - name: Install package + dev deps (+ basic vision so the OCR path is tested)
         run: pip install -e ".[dev,basic]"
       - name: Compile check
