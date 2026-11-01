@@ -49,7 +49,7 @@ fi
 PY="$DIR/.venv/bin/python"
 
 echo "▶ Installing Python deps (mode: $MODE) …"
-uv pip install --python "$PY" "mcp[cli]" mss Pillow websocket-client
+uv pip install --python "$PY" "mcp[cli]>=1.9,<2" mss Pillow websocket-client
 
 if [[ "$MODE" == "basic" ]]; then
   uv pip install --python "$PY" pytesseract

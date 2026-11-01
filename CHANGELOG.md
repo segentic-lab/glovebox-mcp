@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
+## [0.2.1] - 2026-11-01
+
+### Fixed
+- **Fresh installs were broken since 2026-08-26.** The `mcp` dependency was
+  unpinned; the MCP Python SDK 2.0 removed `mcp.server.fastmcp` (FastMCP was
+  renamed `MCPServer`), so `pip install`/`install.sh` pulled 2.x and the server
+  died at import with `No module named 'mcp.server.fastmcp'`. Pinned to
+  `mcp[cli]>=1.9,<2` in pyproject, requirements.txt and install.sh. The 2.x
+  migration is a separate, planned release.
+
 ## [0.2.0] - 2026-07-06
 
 The honesty release: structured responses, a status tool, tests, CI, and a
