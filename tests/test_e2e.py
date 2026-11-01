@@ -318,6 +318,8 @@ def test_basic_vision_groups_lines(x99, xmessage_window):
             p = payload(r)
             assert not r.isError and p["vision"] == "basic" and p["granularity"] == "line"
             labels = " ".join(e["label"] for e in p["elements"])
+            if "Sign in" not in labels:
+                _ocr_diagnostics()                  # what did the runner actually show? (CI artifact)
             assert "Sign in" in labels, labels        # words merged into one line target
             assert all("confidence" in e for e in p["elements"])
             r = await s.call_tool("click_element", {"id": 0, "instance": DISP})
@@ -325,6 +327,31 @@ def test_basic_vision_groups_lines(x99, xmessage_window):
             r = await s.call_tool("parse_screen", {"instance": DISP, "granularity": "bogus"})
             assert r.isError
     asyncio.run(run())
+
+
+def _ocr_diagnostics():
+    """Dump what the X server shows + what tesseract sees, so a CI failure is debuggable from the
+    artifact instead of guessed at (fonts, rendering and OCR all differ between Xvfb and Xephyr)."""
+    import tempfile
+    import mss
+    import pytesseract
+    from PIL import Image
+    from pytesseract import Output
+    out = os.path.join(tempfile.gettempdir(), f"glovebox-{os.getuid()}")
+    os.makedirs(out, exist_ok=True)
+    with (getattr(mss, "MSS", None) or mss.mss)(display=f":{DISP}") as m:
+        shot = m.grab(m.monitors[1])
+    img = Image.frombytes("RGB", shot.size, shot.rgb)
+    img.save(os.path.join(out, "diag_frame.png"))
+    print("xlsfonts 10x20:", subprocess.run(["xlsfonts", "-fn", "10x20"], env=XENV, capture_output=True, text=True))
+    print("windows:", subprocess.run(["xdotool", "search", "--name", ".*", "getwindowname", "%@"], env=XENV,
+                                     capture_output=True, text=True).stdout)
+    print("frame colors:", img.getcolors(8) or "more than 8 colors")
+    for scale in (1, 2):
+        im = img.resize((img.width * scale, img.height * scale)) if scale > 1 else img
+        d = pytesseract.image_to_data(im, lang="eng", output_type=Output.DICT)
+        words = [(t, c) for t, c in zip(d["text"], d["conf"]) if t.strip()]
+        print(f"tesseract words @ {scale}x:", words[:30])
 
 
 def test_explicit_local_without_omniparser_is_an_honest_error(x99):

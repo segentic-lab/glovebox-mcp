@@ -30,3 +30,10 @@ jobs:
         run: python vision.py check
       - name: Run tests (smoke + display e2e)
         run: pytest -v
+      - name: Upload frames + app logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: glovebox-frames-py${{ matrix.python-version }}
+          path: /tmp/glovebox-*/
+          if-no-files-found: ignore
