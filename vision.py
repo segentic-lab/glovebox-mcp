@@ -249,8 +249,12 @@ def parse_tesseract(img, granularity: str = "line"):
                           "pip install pytesseract (or ./install.sh basic), or set GLOVEBOX_VISION=none")
     lang = tesseract_lang_string()
     scale = ocr_scale()
+    from PIL import Image, ImageOps
+    # Grayscale + autocontrast before upscaling: measured on a CI frame (small white window on a
+    # black root) the raw RGB frame yielded nothing at 2x, the preprocessed one every word at 95%+,
+    # in half the time. Coordinates are unaffected (same geometry).
+    img = ImageOps.autocontrast(ImageOps.grayscale(img))
     if scale != 1.0:
-        from PIL import Image
         img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
     try:
         data = pytesseract.image_to_data(img, lang=lang, output_type=Output.DICT)

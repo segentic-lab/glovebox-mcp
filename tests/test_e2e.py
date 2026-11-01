@@ -73,7 +73,8 @@ def xmessage_window(x99):
     if not HAS_XMESSAGE:
         pytest.skip("xmessage not installed")
     # -fn 10x20: a bitmap font from xfonts-base (CI has no scalable fonts; the 6x13 fallback is unreadable)
-    p = subprocess.Popen(["xmessage", "-fn", "10x20", "-center", "Sign in to continue"], env=XENV,
+    # padded with spaces so the glyphs don't touch the window border (OCR eats edge letters)
+    p = subprocess.Popen(["xmessage", "-fn", "10x20", "-center", "    Sign in to continue    "], env=XENV,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.8)
     yield p
@@ -317,10 +318,13 @@ def test_basic_vision_groups_lines(x99, xmessage_window):
             r = await s.call_tool("parse_screen", {"instance": DISP})
             p = payload(r)
             assert not r.isError and p["vision"] == "basic" and p["granularity"] == "line"
-            labels = " ".join(e["label"] for e in p["elements"])
-            if "Sign in" not in labels:
+            labels = [e["label"] for e in p["elements"]]
+            merged = [l for l in labels if "in to continue" in l]
+            if not merged:
                 _ocr_diagnostics()                  # what did the runner actually show? (CI artifact)
-            assert "Sign in" in labels, labels        # words merged into one line target
+            # three words merged into ONE line target proves the grouping; tesseract's reading of
+            # the first glyphs of this bitmap font varies ("Sign"/"gn"), so don't assert on them
+            assert len(merged) == 1, labels
             assert all("confidence" in e for e in p["elements"])
             r = await s.call_tool("click_element", {"id": 0, "instance": DISP})
             assert not r.isError

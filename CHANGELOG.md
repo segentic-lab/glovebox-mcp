@@ -61,9 +61,10 @@ driving every suspected path live over stdio against a throwaway Xephyr.
   actually usable, with the reason in `status()`. An explicitly requested
   `basic`/`local` that is not usable makes `parse_screen` fail with the fix
   named — it never silently falls back.
-- `basic` OCR upscales the frame 2× before tesseract (`GLOVEBOX_OCR_SCALE`,
-  1–4): measured on real UI text, 1× found nothing and 2× read it at 96%
-  confidence. Coordinates are mapped back to screen pixels.
+- `basic` OCR converts the frame to grayscale + autocontrast and upscales it
+  2× before tesseract (`GLOVEBOX_OCR_SCALE`, 1–4): measured on real UI text,
+  the raw frame at 1× found nothing and the preprocessed 2× frame read every
+  word at 95%+. Coordinates are mapped back to screen pixels.
 - Tesseract languages default to `slv+eng` **filtered to what is installed**
   (`GLOVEBOX_TESS_LANG` overrides; `LC_TESS_LANG` still honored). A missing
   language used to be a hard tesseract error.
