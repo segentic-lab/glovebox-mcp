@@ -64,7 +64,9 @@ driving every suspected path live over stdio against a throwaway Xephyr.
 - `basic` OCR converts the frame to grayscale + autocontrast and upscales it
   2× before tesseract (`GLOVEBOX_OCR_SCALE`, 1–4): measured on real UI text,
   the raw frame at 1× found nothing and the preprocessed 2× frame read every
-  word at 95%+. Coordinates are mapped back to screen pixels.
+  word at 95%+. A second pass at 1× runs too and the richer result wins
+  (tesseract 5.3.4 in CI returned nothing for upscaled frames that 5.5.0
+  reads). Coordinates are mapped back to screen pixels.
 - Tesseract languages default to `slv+eng` **filtered to what is installed**
   (`GLOVEBOX_TESS_LANG` overrides; `LC_TESS_LANG` still honored). A missing
   language used to be a hard tesseract error.

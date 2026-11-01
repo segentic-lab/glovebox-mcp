@@ -236,3 +236,26 @@ def test_requested_but_unusable_backend_fails_with_fix(monkeypatch):
         server._do_parse(3)
     p = json.loads(str(e.value))
     assert "GPU too small" in p["error"] and "install.sh local" in p["fix"]
+
+
+def test_parse_tesseract_keeps_the_richer_pass(monkeypatch):
+    """Two OCR passes (2x and 1x); whichever finds more words wins, so a tesseract build that
+    returns nothing for upscaled frames still yields a parse."""
+    import sys, types
+    calls = []
+
+    def image_to_data(im, lang, output_type):
+        calls.append(im.size)
+        if im.size[0] > 100:   # the 2x pass finds nothing
+            return {"text": [], "conf": [], "left": [], "top": [], "width": [], "height": [],
+                    "block_num": [], "par_num": [], "line_num": []}
+        return {"text": ["Sign", "in"], "conf": ["90", "90"], "left": [10, 50], "top": [10, 10],
+                "width": [30, 15], "height": [12, 12], "block_num": [1, 1], "par_num": [1, 1], "line_num": [1, 1]}
+    fake = types.SimpleNamespace(image_to_data=image_to_data, TesseractNotFoundError=RuntimeError,
+                                 Output=types.SimpleNamespace(DICT="dict"))
+    monkeypatch.setitem(sys.modules, "pytesseract", fake)
+    monkeypatch.setattr(vision, "tesseract_lang_string", lambda available=None: "eng")
+    monkeypatch.delenv("GLOVEBOX_OCR_SCALE", raising=False)
+    elems, boxes = vision.parse_tesseract(Image.new("RGB", (100, 50), "white"), "line")
+    assert calls == [(200, 100), (100, 50)]
+    assert [e["label"] for e in elems] == ["Sign in"] and boxes[0] == (10, 10, 65, 22)

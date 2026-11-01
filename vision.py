@@ -248,24 +248,31 @@ def parse_tesseract(img, granularity: str = "line"):
         raise VisionError("pytesseract is not installed",
                           "pip install pytesseract (or ./install.sh basic), or set GLOVEBOX_VISION=none")
     lang = tesseract_lang_string()
-    scale = ocr_scale()
     from PIL import Image, ImageOps
-    # Grayscale + autocontrast before upscaling: measured on a CI frame (small white window on a
-    # black root) the raw RGB frame yielded nothing at 2x, the preprocessed one every word at 95%+,
-    # in half the time. Coordinates are unaffected (same geometry).
-    img = ImageOps.autocontrast(ImageOps.grayscale(img))
-    if scale != 1.0:
-        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-    try:
-        data = pytesseract.image_to_data(img, lang=lang, output_type=Output.DICT)
-    except pytesseract.TesseractNotFoundError:
-        raise VisionError("tesseract binary not found",
-                          "install tesseract-ocr (./install.sh basic) or set GLOVEBOX_VISION=none")
-    except Exception as e:   # TesseractError: bad language data etc.
-        raise VisionError(f"tesseract failed (lang={lang}): {str(e)[:200]}",
-                          "install the language data (apt install tesseract-ocr-<lang>) or set "
-                          "GLOVEBOX_TESS_LANG to an installed language (`tesseract --list-langs`)")
-    return group_tesseract(data, granularity, scale=scale)
+    # Grayscale + autocontrast first: measured on a CI frame (small white window on a black root)
+    # the raw RGB frame yielded nothing, the preprocessed one every word at 95%+, in half the time.
+    gray = ImageOps.autocontrast(ImageOps.grayscale(img))
+    # Two passes, keep the richer one: UI text is usually too small at 1x (2x reads it), but some
+    # tesseract builds return NOTHING for an upscaled frame they read fine at 1x (seen on 5.3.4 in CI
+    # vs 5.5.0 locally). Costs one extra ~0.2 s pass; never returns an empty parse one scale would
+    # have filled. Coordinates are mapped back to screen pixels either way.
+    best = None
+    for scale in dict.fromkeys((ocr_scale(), 1.0)):
+        im = gray if scale == 1.0 else gray.resize((int(gray.width * scale), int(gray.height * scale)), Image.LANCZOS)
+        try:
+            data = pytesseract.image_to_data(im, lang=lang, output_type=Output.DICT)
+        except pytesseract.TesseractNotFoundError:
+            raise VisionError("tesseract binary not found",
+                              "install tesseract-ocr (./install.sh basic) or set GLOVEBOX_VISION=none")
+        except Exception as e:   # TesseractError: bad language data etc.
+            raise VisionError(f"tesseract failed (lang={lang}): {str(e)[:200]}",
+                              "install the language data (apt install tesseract-ocr-<lang>) or set "
+                              "GLOVEBOX_TESS_LANG to an installed language (`tesseract --list-langs`)")
+        elems, boxes = group_tesseract(data, granularity, scale=scale)
+        words = sum(len(e["label"].split()) for e in elems)
+        if best is None or words > best[0]:
+            best = (words, elems, boxes)
+    return best[1], best[2]
 
 
 # ---------- OmniParser backend ----------
