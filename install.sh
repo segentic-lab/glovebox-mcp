@@ -45,6 +45,8 @@ else
 fi
 
 # ---- python env ----
+command -v uv >/dev/null 2>&1 || {
+  echo "✗ uv not found — install it first: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
 [[ -d .venv ]] || uv venv --python 3.12 .venv
 PY="$DIR/.venv/bin/python"
 
@@ -72,31 +74,16 @@ elif [[ "$MODE" == "local" ]]; then
   # openai + matplotlib are imported by OmniParser's util.utils at import time (not used for inference here).
   uv pip install --python "$PY" ultralytics==8.3.70 "transformers==4.49.0" accelerate timm einops==0.8.0 \
     easyocr supervision==0.18.0 opencv-python-headless "numpy==1.26.4" huggingface_hub openai matplotlib
-  [[ -d OmniParser ]] || git clone --depth 1 https://github.com/microsoft/OmniParser.git
-  ( cd OmniParser && mkdir -p weights
-    for f in icon_detect/train_args.yaml icon_detect/model.pt icon_detect/model.yaml \
-             icon_caption/config.json icon_caption/generation_config.json icon_caption/model.safetensors; do
-      "$PY" -c "from huggingface_hub import hf_hub_download as d; d(repo_id='microsoft/OmniParser-v2.0', filename='$f', local_dir='weights')"
-    done
-    [[ -d weights/icon_caption ]] && mv weights/icon_caption weights/icon_caption_florence || true )
-  # make PaddleOCR optional in OmniParser (we use easyocr) — idempotent
-  U="OmniParser/util/utils.py"
-  if grep -qx "from paddleocr import PaddleOCR" "$U" 2>/dev/null; then
-    "$PY" - "$U" <<'PYP'
-import sys, re
-p = sys.argv[1]; s = open(p).read()
-s = s.replace("from paddleocr import PaddleOCR\n",
-              "try:\n    from paddleocr import PaddleOCR\nexcept Exception:\n    PaddleOCR = None\n")
-s = re.sub(r"(rec_batch_num=1024\))\n", r"\1 if PaddleOCR is not None else None\n", s, count=1)
-open(p, "w").write(s); print("patched OmniParser util.utils.py")
-PYP
-  fi
+  # the server owns the OmniParser lifecycle (clone + weights + PaddleOCR patch) — see vision.py
+  "$PY" vision.py install-omniparser
   # verify torch actually sees CUDA at runtime
   "$PY" -c "import torch; assert torch.cuda.is_available(); print('✓ torch CUDA OK:', torch.cuda.get_device_name(0))" 2>/dev/null \
     || echo "  ⚠ torch installed but CUDA not visible at runtime — check the driver."
 fi
 
 echo "$MODE" > .vision-mode
+echo "▶ Vision diagnosis (same as the status() tool):"
+"$PY" vision.py check | "$PY" -c "import json,sys; r=json.load(sys.stdin)['resolution']; print(f\"  requested={r['requested']} effective={r['effective']} ready={r['ready']} — {r['reason']}\")"
 
 # ---- write a ready-to-use MCP client config with the real install path ----
 cat > mcp-config.json <<EOF

@@ -3,8 +3,9 @@
 #
 # Opens a Xephyr window on DISPLAY :1 (a real X server, so xdotool input works even though the
 # host is Wayland) with a window manager + a browser. The MCP server runs with DISPLAY=:1,
-# so the agent's mouse/keyboard/screenshots are CONFINED TO THIS WINDOW —
-# it cannot touch your real desktop, files, or other apps.
+# so the agent's mouse/keyboard/screenshots are CONFINED TO THIS WINDOW — it cannot touch your
+# real desktop or other apps' windows. (The apps inside still run as you, with your files: the
+# isolation is display-level, not a VM.)
 #
 # Usage:   ./start-display.sh [WxH]   (e.g. ./start-display.sh 1920x1080; default 1440x900; leave open)
 # Stop:    pkill Xephyr              (closes the whole sandbox)

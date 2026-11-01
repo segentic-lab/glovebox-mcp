@@ -21,10 +21,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xserver-xephyr xdotool x11-utils xclip openbox wmctrl
-      - name: Install package + dev deps
-        run: pip install -e ".[dev]"
+            xvfb xserver-xephyr xdotool x11-utils xclip openbox wmctrl tesseract-ocr
+      - name: Install package + dev deps (+ basic vision so the OCR path is tested)
+        run: pip install -e ".[dev,basic]"
       - name: Compile check
-        run: python -m compileall -q server.py _version.py
+        run: python -m compileall -q server.py vision.py _version.py
+      - name: Vision self-check (no GPU here -> must resolve to basic, not crash)
+        run: python vision.py check
       - name: Run tests (smoke + display e2e)
         run: pytest -v

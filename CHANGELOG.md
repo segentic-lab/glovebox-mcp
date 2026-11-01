@@ -6,6 +6,109 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
+## [0.3.0] - 2026-11-01
+
+Honesty round two, OmniParser owned by the server, and four tools agents kept
+needing. 23 tools now (was 19). Found by reading `server.py` end to end and
+driving every suspected path live over stdio against a throwaway Xephyr.
+
+### Added
+- **`clipboard(action="get"|"set")`** — exact text out of (or into) an app
+  without OCR; per-instance (each Xephyr has its own selection).
+- **`wait_for_stable(instance, timeout_ms, threshold, observe)`** — waits until
+  two consecutive frames differ by less than `threshold`; reports
+  `stable`/`timed_out` honestly instead of guessing a `settle_ms`.
+- **`window_info(instance)`** — active window title/geometry + visible windows:
+  confirm navigation without an image.
+- **`app_log(instance, lines)`** — tail of the launched app's stderr.
+- `screenshot(region, scale, format, quality)` — crop/zoom, downscale, JPEG;
+  returns `[json, image]` like `observe` does (so "every tool returns JSON" is
+  finally true).
+- `press_keys` accepts space-separated **sequences** (`"ctrl+a Delete"`).
+- `drag(steps=10)` emits intermediate motion events (canvases, sliders).
+- `parse_screen(granularity="line"|"word")` — `basic` mode merges OCR words on
+  one line into a single target (`"Sign in"`), with a `confidence` per element.
+- `list_files` entries carry `bytes`, `modified`, `is_dir` and `partial`
+  (in-progress `.crdownload`/`.part`), newest first.
+- `upload_file(page_url_contains=…)` picks the tab when several are open;
+  relative paths resolve against `files/<N>/`.
+- `launch_app` returns `width`/`height`/`warnings`; recognizes the whole
+  Chromium family (google-chrome(-stable), brave(-browser), microsoft-edge,
+  vivaldi, opera) for CDP flags + per-instance profiles; display numbers are
+  allocated under a **cross-process file lock** so parallel agents can't both
+  take `:2`.
+- `GLOVEBOX_CLEANUP_ON_EXIT=1` closes the instances a server process launched
+  when it exits (default off: instances outlive the server on purpose).
+- `list_instances`/`status` rows carry `launched_here`.
+- **`vision.py`**: backend selection, GPU preflight (`nvidia-smi`: present, VRAM
+  total/free, ≥ 6 GB), tesseract language detection, OmniParser lazy loader with
+  structured errors (not installed, no/too-small GPU, CUDA invisible to torch,
+  out of memory), and the OmniParser install (`python vision.py
+  install-omniparser`) moved out of `install.sh`. `python vision.py check`
+  prints the diagnosis. `status()` returns it under `vision` (requested vs.
+  effective backend, reason, gpu, omniparser, tesseract) and lists `openbox`,
+  `xdpyinfo`, `dbus_run_session`, `nvidia_smi` in `deps`.
+- 32 tests (was 11): smoke tests for the vision rules, GPU thresholds, OCR
+  grouping, `--` argument safety, bounds checks and the anchored kill pattern;
+  e2e asserts the **pointer actually moved**, clipboard round-trip, screenshot
+  region/scale/format, `wait_for_stable`, `window_info`, `app_log`,
+  `list_files` entries, `basic` line grouping, strict-`local` error, and
+  cleanup-on-exit. CI installs tesseract so the `basic` path runs.
+- `ROADMAP.md` (MCP SDK 2.x migration plan, candidates, housekeeping).
+
+### Changed
+- **Default vision mode is `auto`** (was `local`): the best backend that is
+  actually usable, with the reason in `status()`. An explicitly requested
+  `basic`/`local` that is not usable makes `parse_screen` fail with the fix
+  named — it never silently falls back.
+- Tesseract languages default to `slv+eng` **filtered to what is installed**
+  (`GLOVEBOX_TESS_LANG` overrides; `LC_TESS_LANG` still honored). A missing
+  language used to be a hard tesseract error.
+- Annotated frames and app logs live in `$TMPDIR/glovebox-<uid>/` (no
+  cross-user collisions in `/tmp`); `parse_screen` returns the path.
+- `settle_ms` above 5000 is clamped **and flagged** (`settle_clamped`), like
+  `wait_ms` already was.
+- Documentation no longer claims file isolation: the sandbox is display-level,
+  apps run as your user (README, AGENTS.md, start-display.sh header).
+- `scroll` sends one xdotool call with `--repeat` (capped at 100 notches).
+
+### Fixed
+- **Default-mode `parse_screen` returned a bare `No module named 'util'`** on
+  any machine without OmniParser (the default was `local`). Now a structured
+  error with the fix, or an `auto` fallback that says so.
+- **Off-screen coordinates reported success** — xdotool clamps `(9999,9999)`
+  to the edge and negatives to 0. Coordinates are now validated against the
+  cached display geometry; nothing is clicked.
+- **Option-like arguments** — `press_keys("-h")` made xdotool print its help
+  and exit 0 ("pressed -h"); negative coordinates produced a usage dump. All
+  xdotool calls now pass user values after `--`, and `press_keys` rejects
+  tokens starting with `-` up front; `Invalid key sequence` is detected like
+  `No such key name`.
+- **Pointer motion ignored without a window manager**: Xephyr drops xdotool
+  motion until a WM runs, so every click landed in the screen center while
+  reporting success. `launch_app` now returns a warning when `openbox` is
+  missing, `status().deps` lists it, and the e2e suite asserts the pointer
+  position after `click`/`drag`.
+- `open_file` reported success when the handler exited immediately (xdg-open
+  with no application for the type, a missing app). It now polls like
+  `launch_app` and quotes the stderr tail; the xdg-open path gets the same
+  X11/D-Bus environment as `app=` (its docstring promised that; it wasn't
+  true), so a GTK handler can't activate a window on the host instead.
+- `_kill_xephyr` used `pkill -f "Xephyr :N "` **unanchored** — it also matched
+  any shell or editor whose command line contained that string (it killed the
+  audit's own shell). Anchored to `^Xephyr :N `.
+- **No subprocess had a timeout**: a frozen Xephyr hung `xdpyinfo`/`xdotool`
+  and therefore the tool call forever. `xdpyinfo` 5 s, `xdotool` 20 s, `xclip`
+  5 s, `pkill` 5 s — a timeout is reported as a frozen display with the fix.
+- `upload_file`'s CDP HTTP call honored `http_proxy` from the environment and
+  timed out through the proxy; it now uses a no-proxy opener.
+- `launch_app` left a Xephyr `Popen` unreaped when the display never came up.
+- `clipboard`/`type_text` `xclip -i` no longer blocks on the daemonized
+  selection owner's inherited pipe.
+- `mss.MSS` is used when available (`mss.mss` is deprecated in mss 10).
+- Stale `'claude'` vision-mode comments in pyproject/requirements; `install.sh`
+  now checks for `uv` before using it.
+
 ## [0.2.1] - 2026-11-01
 
 ### Fixed
