@@ -29,7 +29,7 @@ classifiers = [
 # Core runtime. The 'none' vision mode needs only these (plus system packages:
 # Xephyr, openbox, scrot, xdotool, wmctrl — see install.sh).
 dependencies = [
-  "mcp[cli]>=1.9,<2",   # 2.x renamed FastMCP -> MCPServer; migration tracked in ROADMAP.md
+  "mcp[cli]>=2.0,<3",   # 2.x API (MCPServer); 1.x is not supported since glovebox 0.4.0
   "mss",
   "Pillow",
   "websocket-client",

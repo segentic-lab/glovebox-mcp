@@ -43,19 +43,22 @@ HOST = os.environ.get("GLOVEBOX_HOST_DISPLAY", ":0")
 TMP = os.path.join(tempfile.gettempdir(), f"glovebox-{os.getuid()}")   # annotated frames + app logs
 os.makedirs(TMP, exist_ok=True)
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.server.fastmcp.utilities.types import Image as MCPImage
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.utilities.types import Image as MCPImage
 import mss
 from PIL import Image, ImageChops, ImageDraw
 
 import vision
 from _version import __version__
 
-mcp = FastMCP("glovebox")
-# FastMCP has no version parameter; set it on the underlying server so the real project
-# version (not the MCP SDK's) reaches the client in the initialize handshake.
-mcp._mcp_server.version = __version__
+# MCP SDK 2.x: the project version goes straight into the initialize handshake. Sync tool
+# functions run on a worker thread in 2.x, so calls on one server process may overlap — module
+# state that is mutated (INSTANCES, _LAST, _GEOM, _LAUNCHED) is guarded by _LOCK or is a single
+# atomic dict operation; the OmniParser loader has its own lock.
+mcp = MCPServer("glovebox", version=__version__,
+                instructions="Sandboxed computer use: drive real apps inside nested X11 windows. Call status() "
+                             "first; every tool returns JSON with ok/fix; see AGENTS.md in the repo.")
 
 INSTANCES = {}   # N -> {name, command, size, xephyr_pid, app_pid}
 _LAST = {}       # N -> {element id -> (cx, cy)} from that instance's last parse_screen

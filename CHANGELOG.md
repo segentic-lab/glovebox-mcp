@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
+## [0.4.0] - Unreleased
+
+### Changed
+- **MCP Python SDK 2.x** (`mcp[cli]>=2.0,<3`; 1.x is no longer supported).
+  `FastMCP` → `MCPServer("glovebox", version=…)`, which also retires the
+  private `_mcp_server.version` hack — the handshake version is now a public
+  constructor argument. `ToolError`/`Image` import from
+  `mcp.server.mcpserver.*`. The server also sends `instructions` in the
+  handshake (call `status()` first, every tool returns JSON with `ok`/`fix`).
+- **Tool calls may overlap.** In 2.x sync tool functions run on a worker
+  thread, so one server process can execute two calls at once (1.x ran them
+  one after another on the event loop). Mutable module state is guarded
+  (`_LOCK` around instance allocation/close, the OmniParser loader's own
+  lock, atomic dict ops elsewhere); an e2e test now runs calls concurrently.
+  Driving ONE instance from two concurrent calls is still a bad idea (shared
+  cursor) — that is the agent's contract, unchanged.
+- Test client code uses 2.x wire names (`is_error`, `server_info`,
+  `mime_type`). Nothing changes for agents: the JSON payloads, `isError`
+  flag on the wire and `[json, image]` returns are identical.
+
 ## [0.3.0] - 2026-11-01
 
 Honesty round two, OmniParser owned by the server, and four tools agents kept

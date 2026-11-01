@@ -9,7 +9,7 @@ from PIL import Image
 import server
 import vision
 from _version import __version__
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 EXPECTED_TOOLS = {
     "launch_app", "list_instances", "close_instance", "get_screen_size", "screenshot",
@@ -36,9 +36,9 @@ def test_descriptions_are_agent_first():
 
 
 def test_version_reaches_handshake():
-    assert server.mcp._mcp_server.version == __version__
-    opts = server.mcp._mcp_server.create_initialization_options()
-    assert opts.server_version == __version__
+    """MCPServer(version=...) is what the initialize handshake reports (the e2e asserts it on the wire)."""
+    assert server.mcp.version == __version__
+    assert server.mcp.name == "glovebox"
 
 
 def test_fail_raises_structured_toolerror():

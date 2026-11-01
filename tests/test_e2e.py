@@ -118,8 +118,8 @@ def test_handshake_reports_project_version(x99):
 
     async def run():
         async with glovebox() as (s, init):
-            assert init.serverInfo.name == "glovebox"
-            assert init.serverInfo.version == __version__
+            assert init.server_info.name == "glovebox"
+            assert init.server_info.version == __version__
             tools = await s.list_tools()
             assert len(tools.tools) == 23
     asyncio.run(run())
@@ -131,17 +131,17 @@ def test_control_roundtrip_and_error_paths(x99):
             # happy path against the real display
             r = await s.call_tool("get_screen_size", {"instance": DISP})
             p = payload(r)
-            assert not r.isError and p["ok"] and (p["width"], p["height"]) == (1024, 768)
+            assert not r.is_error and p["ok"] and (p["width"], p["height"]) == (1024, 768)
             assert p["vision"] == "none"
 
             # screenshot returns [json, image]
             r = await s.call_tool("screenshot", {"instance": DISP})
             p = payload(r)
-            assert not r.isError and p["format"] == "png" and p["width"] == 1024
+            assert not r.is_error and p["format"] == "png" and p["width"] == 1024
             assert len(r.content) == 2 and r.content[1].type == "image"
 
             r = await s.call_tool("click", {"x": 10, "y": 10, "instance": DISP})
-            assert not r.isError and payload(r)["ok"]
+            assert not r.is_error and payload(r)["ok"]
             if HAS_WM:
                 assert pointer() == (10, 10), "click reported ok but the pointer never moved"
 
@@ -149,56 +149,56 @@ def test_control_roundtrip_and_error_paths(x99):
             r = await s.call_tool("click", {"x": 10, "y": 10, "instance": DISP,
                                             "observe": "screenshot", "settle_ms": 6000})
             p = payload(r)
-            assert not r.isError and p["observed"] == "screenshot"
+            assert not r.is_error and p["observed"] == "screenshot"
             assert p["settled_ms"] == 5000 and p["settle_clamped"] is True
             assert len(r.content) == 2 and r.content[1].type == "image"
 
             # vision=none parse is an informative note, not an error
             r = await s.call_tool("parse_screen", {"instance": DISP})
             p = payload(r)
-            assert not r.isError and p["ok"] and p["vision"] == "none" and "note" in p
+            assert not r.is_error and p["ok"] and p["vision"] == "none" and "note" in p
 
             # every lie the old server told must now be an isError with a named fix
             r = await s.call_tool("click", {"x": 1, "y": 1, "instance": DEAD})
-            assert r.isError and payload(r)["ok"] is False and "fix" in payload(r)
+            assert r.is_error and payload(r)["ok"] is False and "fix" in payload(r)
 
             for bad in ({"x": 9999, "y": 5}, {"x": -3, "y": 5}, {"x": 5, "y": 768}):
                 r = await s.call_tool("click", {**bad, "instance": DISP})
-                assert r.isError and "outside" in payload(r)["error"], bad
+                assert r.is_error and "outside" in payload(r)["error"], bad
 
             r = await s.call_tool("click_element", {"id": 0, "instance": DISP})
-            assert r.isError and "parse_screen" in payload(r)["fix"]
+            assert r.is_error and "parse_screen" in payload(r)["fix"]
 
             r = await s.call_tool("close_instance", {"instance": DEAD})
-            assert r.isError and payload(r)["ok"] is False
+            assert r.is_error and payload(r)["ok"] is False
 
             r = await s.call_tool("close_instance", {"instance": 1})
-            assert r.isError  # instance 1 is protected
+            assert r.is_error  # instance 1 is protected
 
             r = await s.call_tool("scroll", {"amount": 0, "instance": DISP})
-            assert r.isError  # zero scroll is a no-op, not a success
+            assert r.is_error  # zero scroll is a no-op, not a success
 
             r = await s.call_tool("press_keys", {"keys": "NoSuchKey", "instance": DISP})
-            assert r.isError  # xdotool silently ignores bad keysyms; the server must not
+            assert r.is_error  # xdotool silently ignores bad keysyms; the server must not
 
             r = await s.call_tool("press_keys", {"keys": "-h", "instance": DISP})
-            assert r.isError and "nothing was pressed" in payload(r)["error"]
+            assert r.is_error and "nothing was pressed" in payload(r)["error"]
 
             r = await s.call_tool("press_keys", {"keys": "ctrl+a Delete", "instance": DISP})
-            assert not r.isError and payload(r)["keys"] == ["ctrl+a", "Delete"]
+            assert not r.is_error and payload(r)["keys"] == ["ctrl+a", "Delete"]
 
             r = await s.call_tool("click", {"x": 1, "y": 1, "instance": DISP, "observe": "bogus"})
-            assert r.isError and "not performed" in payload(r)["error"]
+            assert r.is_error and "not performed" in payload(r)["error"]
 
             r = await s.call_tool("upload_file", {"filepath": "/does/not/exist", "instance": DISP})
-            assert r.isError and "not found" in payload(r)["error"]
+            assert r.is_error and "not found" in payload(r)["error"]
 
             r = await s.call_tool("wait_ms", {"ms": 20000})
             p = payload(r)
             assert p["clamped"] is True and p["waited_ms"] == 10000
 
             r = await s.call_tool("drag", {"x1": 10, "y1": 10, "x2": 100, "y2": 100, "instance": DISP, "steps": 4})
-            assert not r.isError and payload(r)["steps"] == 4
+            assert not r.is_error and payload(r)["steps"] == 4
             if HAS_WM:
                 assert pointer() == (100, 100)
 
@@ -215,14 +215,14 @@ def test_screenshot_region_scale_format(x99):
             r = await s.call_tool("screenshot", {"instance": DISP, "region": "0,0,200,100",
                                                  "scale": 0.5, "format": "jpeg"})
             p = payload(r)
-            assert not r.isError and p["region"] == [0, 0, 200, 100] and p["image_size"] == [100, 50]
-            assert p["format"] == "jpeg" and r.content[1].mimeType == "image/jpeg"
+            assert not r.is_error and p["region"] == [0, 0, 200, 100] and p["image_size"] == [100, 50]
+            assert p["format"] == "jpeg" and r.content[1].mime_type == "image/jpeg"
 
             r = await s.call_tool("screenshot", {"instance": DISP, "region": "900,0,200,100"})
-            assert r.isError and "exceeds" in payload(r)["error"]
+            assert r.is_error and "exceeds" in payload(r)["error"]
 
             r = await s.call_tool("screenshot", {"instance": DISP, "format": "gif"})
-            assert r.isError
+            assert r.is_error
     asyncio.run(run())
 
 
@@ -231,10 +231,10 @@ def test_wait_for_stable_on_static_screen(x99):
         async with glovebox() as (s, _):
             r = await s.call_tool("wait_for_stable", {"instance": DISP, "timeout_ms": 3000, "interval_ms": 150})
             p = payload(r)
-            assert not r.isError and p["stable"] is True and p["timed_out"] is False and p["frames"] >= 2
+            assert not r.is_error and p["stable"] is True and p["timed_out"] is False and p["frames"] >= 2
 
             r = await s.call_tool("wait_for_stable", {"instance": DEAD})
-            assert r.isError
+            assert r.is_error
     asyncio.run(run())
 
 
@@ -244,13 +244,13 @@ def test_clipboard_roundtrip_and_type_text_unicode(x99):
         async with glovebox() as (s, _):
             text = "Nadja Kovačič — čšž"
             r = await s.call_tool("clipboard", {"action": "set", "text": text, "instance": DISP})
-            assert not r.isError and payload(r)["length"] == len(text)
+            assert not r.is_error and payload(r)["length"] == len(text)
             r = await s.call_tool("clipboard", {"action": "get", "instance": DISP})
             p = payload(r)
             assert p["text"] == text and p["empty"] is False
 
             r = await s.call_tool("clipboard", {"action": "paste", "instance": DISP})
-            assert r.isError
+            assert r.is_error
 
             r = await s.call_tool("type_text", {"text": "plain ascii", "instance": DISP})
             assert payload(r)["method"] == "xdotool"
@@ -269,22 +269,22 @@ def test_window_info_and_app_log(x99, xmessage_window):
         async with glovebox() as (s, _):
             r = await s.call_tool("window_info", {"instance": DISP})
             p = payload(r)
-            assert not r.isError and any(w["title"] == "xmessage" for w in p["windows"])
+            assert not r.is_error and any(w["title"] == "xmessage" for w in p["windows"])
             if HAS_WM:
                 assert p["active"] and p["active"]["title"] == "xmessage" and p["active"]["width"] > 0
 
             r = await s.call_tool("app_log", {"instance": DEAD})
-            assert r.isError and "no app log" in payload(r)["error"]
+            assert r.is_error and "no app log" in payload(r)["error"]
 
             r = await s.call_tool("open_file", {"filepath": "/etc/hostname", "instance": DISP, "app": "no-such-app"})
-            assert r.isError and "exited immediately" in payload(r)["error"]
+            assert r.is_error and "exited immediately" in payload(r)["error"]
 
             if HAS_XMESSAGE:
                 r = await s.call_tool("open_file", {"filepath": "/etc/hostname", "instance": DISP, "app": "xmessage"})
                 p = payload(r)
-                assert not r.isError and p["app"] == "xmessage" and p["pid"] > 0
+                assert not r.is_error and p["app"] == "xmessage" and p["pid"] > 0
                 r = await s.call_tool("app_log", {"instance": DISP})
-                assert not r.isError and "lines" in payload(r)
+                assert not r.is_error and "lines" in payload(r)
                 subprocess.run(["pkill", "-f", "^xmessage /etc/hostname"], capture_output=True)
     asyncio.run(run())
 
@@ -317,7 +317,7 @@ def test_basic_vision_groups_lines(x99, xmessage_window):
         async with glovebox({"GLOVEBOX_VISION": "basic"}) as (s, _):
             r = await s.call_tool("parse_screen", {"instance": DISP})
             p = payload(r)
-            assert not r.isError and p["vision"] == "basic" and p["granularity"] == "line"
+            assert not r.is_error and p["vision"] == "basic" and p["granularity"] == "line"
             labels = [e["label"] for e in p["elements"]]
             merged = [l for l in labels if "in to continue" in l]
             if not merged:
@@ -327,9 +327,9 @@ def test_basic_vision_groups_lines(x99, xmessage_window):
             assert len(merged) == 1, labels
             assert all("confidence" in e for e in p["elements"])
             r = await s.call_tool("click_element", {"id": 0, "instance": DISP})
-            assert not r.isError
+            assert not r.is_error
             r = await s.call_tool("parse_screen", {"instance": DISP, "granularity": "bogus"})
-            assert r.isError
+            assert r.is_error
     asyncio.run(run())
 
 
@@ -368,7 +368,7 @@ def test_explicit_local_without_omniparser_is_an_honest_error(x99):
         async with glovebox({"GLOVEBOX_VISION": "local"}) as (s, _):
             r = await s.call_tool("parse_screen", {"instance": DISP})
             p = payload(r)
-            assert r.isError and p["ok"] is False and "install.sh local" in p["fix"]
+            assert r.is_error and p["ok"] is False and "install.sh local" in p["fix"]
             r = await s.call_tool("status", {})
             v = payload(r)["vision"]
             assert v["requested"] == "local" and v["ready"] is False and v["omniparser"]["code"] is False
@@ -381,12 +381,12 @@ def test_launch_app_lifecycle(x99):
     async def run():
         async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
             r = await s.call_tool("launch_app", {"command": "no-such-binary-xyz"})
-            assert r.isError and payload(r)["ok"] is False
+            assert r.is_error and payload(r)["ok"] is False
 
             r = await s.call_tool("launch_app",
                                   {"command": "xmessage -center glovebox-e2e", "size": "640x480"})
             p = payload(r)
-            assert not r.isError and p["ok"]
+            assert not r.is_error and p["ok"]
             n = p["instance"]
             assert n != 1 and p["width"] == 640 and isinstance(p["warnings"], list)
             if HAS_WM:
@@ -400,13 +400,13 @@ def test_launch_app_lifecycle(x99):
             assert row["up"] and row["launched_here"] is True
 
             r = await s.call_tool("app_log", {"instance": n})
-            assert not r.isError
+            assert not r.is_error
 
             r = await s.call_tool("close_instance", {"instance": n})
-            assert not r.isError and payload(r)["ok"]
+            assert not r.is_error and payload(r)["ok"]
 
             r = await s.call_tool("close_instance", {"instance": n})
-            assert r.isError  # closing twice must not pretend success
+            assert r.is_error  # closing twice must not pretend success
     asyncio.run(run())
 
 
@@ -422,3 +422,33 @@ def test_cleanup_on_exit_closes_launched_instances(x99):
             break
         time.sleep(0.25)
     assert not _display_up(f":{n}"), "instance survived server exit despite GLOVEBOX_CLEANUP_ON_EXIT=1"
+
+
+def test_concurrent_calls_overlap_and_launches_do_not_collide(x99):
+    """MCP SDK 2.x runs sync tools on a worker thread, so calls on one server can overlap.
+    Document that (two 1.5 s waits finish in well under 3 s) and prove the allocation lock holds:
+    two simultaneous launch_app calls must get two different displays."""
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
+            t0 = time.time()
+            a, b = await asyncio.gather(s.call_tool("wait_ms", {"ms": 1500}), s.call_tool("wait_ms", {"ms": 1500}))
+            elapsed = time.time() - t0
+            assert payload(a)["waited_ms"] == 1500 and payload(b)["waited_ms"] == 1500
+            assert elapsed < 2.6, f"calls were serialized ({elapsed:.1f}s) — 2.x should overlap them"
+
+            r1, r2 = await asyncio.gather(s.call_tool("get_screen_size", {"instance": DISP}),
+                                          s.call_tool("window_info", {"instance": DISP}))
+            assert not r1.is_error and not r2.is_error
+
+            if not (shutil.which("Xephyr") and HAS_XMESSAGE):
+                return
+            l1, l2 = await asyncio.gather(
+                s.call_tool("launch_app", {"command": "xmessage -center one", "size": "320x240"}),
+                s.call_tool("launch_app", {"command": "xmessage -center two", "size": "320x240"}))
+            p1, p2 = payload(l1), payload(l2)
+            assert p1["ok"] and p2["ok"]
+            assert p1["instance"] != p2["instance"], (p1, p2)
+            for n in (p1["instance"], p2["instance"]):
+                r = await s.call_tool("close_instance", {"instance": n})
+                assert not r.is_error, payload(r)
+    asyncio.run(run())

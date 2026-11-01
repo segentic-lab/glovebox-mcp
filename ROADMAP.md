@@ -11,19 +11,13 @@ timeouts, proxy leaking into CDP, raw `No module named 'util'` in the default vi
 vision backends moved into `vision.py` with a GPU preflight and an `auto` mode that reports its
 reasoning, and four new tools (`clipboard`, `wait_for_stable`, `window_info`, `app_log`).
 
-## 0.4.x — MCP Python SDK 2.x
+## 0.4.0 — MCP Python SDK 2.x (done 2026-11-01, unreleased)
 
-The server is pinned to `mcp<2` (0.2.1) because 2.0 renamed `FastMCP` → `MCPServer` and moved
-`ToolError`/`Image`. Scope of the migration (small, but it changes runtime semantics):
-
-- `MCPServer("glovebox", version=__version__)` replaces the `_mcp_server.version` hack;
-  `mcp.server.mcpserver.{exceptions,utilities.types}` import paths.
-- **Sync handlers run on a worker thread in 2.x.** Tool calls may then overlap; `INSTANCES`,
-  `_LAST`, `_GEOM` and the OmniParser loader already take `_LOCK`/their own lock — audit every
-  mutation before switching.
-- Smoke tests read `_mcp_server`; move them to the public `list_tools()` / initialize path.
-- Keep Python 3.10 (2.3.0 still supports it) and re-run the full suite under both 1.30 and 2.x
-  before dropping the pin.
+Migrated: `MCPServer("glovebox", version=…)`, 2.x import paths, snake_case wire names in the
+test client, dependency floor `mcp[cli]>=2.0,<3`. Verified: the full suite passes under 2.3.0,
+including the error paths (`ToolError` → `isError`) and `[json, image]` returns. The one
+semantic change — sync tools run on a worker thread, so calls can overlap — is covered by a
+concurrency e2e and the existing locks. Python 3.10 stays supported.
 
 ## 0.4.x — shared vision service (one GPU load for the whole fleet)
 
@@ -49,8 +43,7 @@ Unix socket (`$XDG_RUNTIME_DIR/glovebox-vision.sock`); the server processes beco
 - **Tests**: service start/stop/idle-exit and the protocol round-trip run without a GPU by
   mocking the parser; the real-GPU path stays a manual check (CI has no GPU).
 
-Ordering: this ranks **ahead** of the MCP SDK 2.x migration if multi-agent `local` mode is the
-main use; otherwise after it. Both are independent of each other.
+Ordering: next up (the MCP SDK 2.x migration landed first because it was mechanical).
 
 ## 0.4.x — candidates, not yet committed
 
