@@ -23,6 +23,12 @@ else
   echo "▶ Display $DISP already running."
 fi
 
+# Make the window usable by a PERSON too: Xephyr maps AltGr as plain Alt (no @ { } [ ] on
+# Slovenian/German/... layouts), so copy the host keymap; and mirror the clipboard both ways.
+PY="$DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+"$PY" "$DIR/host_bridge.py" keymap "$DISP" --host "${GLOVEBOX_HOST_DISPLAY:-:0}" >/dev/null || echo "⚠ keymap copy failed (install x11-xkb-utils); AltGr characters will not work when typing by hand"
+"$PY" "$DIR/host_bridge.py" spawn "$DISP" --host "${GLOVEBOX_HOST_DISPLAY:-:0}" >/dev/null
+
 export DISPLAY="$DISP"
 # CRITICAL: without this, snap Chromium picks the Wayland backend and renders to your REAL screen,
 # leaving the X11 :1 sandbox black. Force X11/Xephyr.

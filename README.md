@@ -30,8 +30,9 @@ your filesystem. For OS-level isolation run glovebox inside a VM or container.
 - **Linux** — the sandbox nests a real X server (Xephyr), so it works even on **Wayland** hosts
   (via Xwayland). Not macOS/Windows. Developed on Ubuntu; any modern Linux with the packages below.
 - **Python 3.10+** and [`uv`](https://docs.astral.sh/uv/) (used for the virtualenv).
-- **System packages** — `xserver-xephyr` (Xephyr), `openbox`, `scrot`, `x11-utils`, `xdotool`,
-  `wmctrl`, `xclip` (+ `tesseract-ocr` for `basic`). On Debian/Ubuntu the installer **auto-installs**
+- **System packages** — `xserver-xephyr` (Xephyr), `openbox`, `scrot`, `x11-utils`, `x11-xkb-utils`
+  (xkbcomp: gives the sandbox your keyboard layout), `xdotool`, `wmctrl`, `xclip` (+ `tesseract-ocr`
+  for `basic`). On Debian/Ubuntu the installer **auto-installs**
   them via `apt` (sudo); on Fedora/Arch it prints the matching `dnf`/`pacman` command. The MCP server
   itself is distro-agnostic — any Linux with these tools works. `openbox` is not optional in
   practice: without a window manager Xephyr ignores synthetic pointer motion, so clicks would land in
@@ -110,14 +111,14 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | `click(x,y)` · `double_click` · `move_mouse` · `scroll` · `drag(…, steps?)` | Pointer ops. Coordinates outside the display are **rejected** (xdotool would silently clamp them). `drag` emits intermediate motion events so canvases and sliders register it. |
 | `type_text(text)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps). |
 | `press_keys("ctrl+a" / "Return" / "ctrl+a Delete")` | Keys, combos, and space-separated **sequences** (xdotool syntax). Invalid names error — nothing is pressed. |
-| `clipboard(action="get"\|"set", text?)` | Read the instance's clipboard (select + `ctrl+c`, then read **exact** text — no OCR) or set it (then `ctrl+v`). Per-instance. |
+| `clipboard(action="get"\|"set", text?)` | Read the instance's clipboard (select + `ctrl+c`, then read **exact** text — no OCR) or set it (then `ctrl+v`). Per-instance; text is mirrored to/from the **host** clipboard by the per-instance bridge, so a person can copy-paste across. |
 | `wait_for_stable(instance, timeout_ms?, threshold?)` | Wait until the screen **stops changing** (page loaded, app drew) instead of guessing a delay. Reports `stable`/`timed_out` honestly. |
 | `window_info(instance)` | Active window title + geometry and the visible windows — confirm navigation or that an app opened, without an image. |
 | `upload_file(filepath, selector?, page_url_contains?)` | Attach a local file to a page's `<input type=file>` via the **Chrome DevTools Protocol**. The nested X11 file picker is invisible to automation **and hangs the renderer**, so use this for all uploads — never click an upload button expecting a dialog. Works on Chromium-family browsers started by `launch_app`/`start-display.sh` (per-instance `--remote-debugging-port`, `9222+N`). **Browser file inputs only** — for native apps see `open_file`. |
 | `open_file(filepath, app?)` | Open a local file in a **native** app on the instance's display (e.g. `app="gimp"`) or via `xdg-open`. Fails honestly if the handler exits immediately (no app registered for that type). |
 | `list_files()` | The instance's staging folder `files/<N>/` + entries with size, mtime and a `partial` flag for in-progress downloads. |
 | `app_log(instance, lines?)` | Tail of the launched app's stderr — read it when an app crashed or drew nothing. |
-| `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n)` | Multi-instance control (see below). |
+| `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). |
 | `wait_ms(ms)` · `get_screen_size()` | Timing / sandbox size + effective vision backend. |
 
 Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** (see below).
@@ -173,6 +174,24 @@ each its own Xephyr display/window on the host desktop:
   get D-Bus isolation. Returns the instance id, size and any warnings.
 - `list_instances()` · `close_instance(n)` · `app_log(n)`.
 
+**A person can use the window too.** Two things do not cross the nested-X-server boundary on their
+own, and `launch_app` (and `start-display.sh`) fix both:
+
+- **Keyboard layout** — Xephyr copies the host's keysyms but files the AltGr key under plain `Alt`,
+  so on Slovenian, Croatian, German, … layouts AltGr+V arrives as Alt+v and **`@ { } [ ] | ~ €`
+  cannot be typed by hand** (the agent's `type_text` is unaffected — xdotool addresses keysyms).
+  The host's complete keymap is copied into every instance (`xkbcomp`), verified, and re-copied by
+  the bridge within 5 s if Xephyr reloads its own map or you switch the host layout. The launch
+  result reports `keyboard: {method: "host-keymap", host_layout, verified}`. `GLOVEBOX_KEYBOARD=de`
+  forces a layout instead.
+- **Clipboard** — each X server has its own; the per-instance **bridge process** mirrors *text*
+  between the host and the instance clipboard (both directions, ~0.5 s, `CLIPBOARD` only, no
+  images). On Wayland desktops the compositor already bridges the Xwayland clipboard to native
+  apps, so copy on the host → paste in the sandbox and back just works. `type_text` restores the
+  previous clipboard after its unicode paste so agent text does not linger on your host clipboard.
+  Disable with `GLOVEBOX_CLIPBOARD_SYNC=0`; `list_instances` shows `clipboard_sync` per instance.
+  The bridge exits by itself when the instance closes.
+
 Because each display has its **own cursor**, multiple agents can drive different instances **in parallel** —
 one window each. Each agent's server process allocates display numbers under a **cross-process lock**,
 so simultaneous launches don't collide. The GPU is shared through the vision service (one model
@@ -214,6 +233,9 @@ in-progress downloads.
 | `GLOVEBOX_VISION` | `auto` (or `.vision-mode`) | `auto` · `none` · `basic` · `local` |
 | `GLOVEBOX_HOST_DISPLAY` | `:0` | host display where new Xephyr windows appear |
 | `GLOVEBOX_CLEANUP_ON_EXIT` | off | `1` → close the instances this server launched when it exits |
+| `GLOVEBOX_CLIPBOARD_SYNC` | `1` | per-instance host bridge (clipboard mirroring + keymap kept equal to the host); `0` = off |
+| `GLOVEBOX_CLIPBOARD_POLL` | `0.5` | seconds between clipboard polls in the bridge |
+| `GLOVEBOX_KEYBOARD` | unset | force a layout for new instances (`si`, `de(nodeadkeys)`) instead of copying the host keymap |
 | `GLOVEBOX_TESS_LANG` | `slv+eng` ∩ installed | tesseract language string for `basic` |
 | `GLOVEBOX_VISION_SERVICE` | `1` | `local` mode parses through the shared per-machine service; `0` = load models in every server process |
 | `GLOVEBOX_VISION_SOCKET` | `$XDG_RUNTIME_DIR/glovebox-vision.sock` | the service's Unix socket |
@@ -250,6 +272,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - `server.py` — the MCP server (all 23 tools).
 - `vision.py` — vision backends: selection rules, GPU preflight, tesseract grouping, OmniParser lifecycle (`check` / `install-omniparser` CLI).
 - `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
+- `host_bridge.py` — per-instance host bridge: host keymap copy (AltGr fix) + clipboard mirroring (`keymap` / `serve` / `spawn` / `status` CLI).
 - `install.sh` — mode-aware installer (`none` / `basic` / `local`).
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
 - `AGENTS.md` — drop-in tool-usage instructions for the AI agent (paste into its system prompt).

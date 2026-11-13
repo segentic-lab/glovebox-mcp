@@ -21,11 +21,11 @@ if [[ "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
 fi
 
 # ---- system packages — auto via apt (Debian/Ubuntu); guided elsewhere (the server is distro-agnostic) ----
-APT_PKGS="xserver-xephyr openbox scrot x11-utils xdotool wmctrl xclip"
+APT_PKGS="xserver-xephyr openbox scrot x11-utils x11-xkb-utils xdotool wmctrl xclip"
 [[ "$MODE" == "basic" ]] && APT_PKGS="$APT_PKGS tesseract-ocr tesseract-ocr-slv"
 TESS=""; [[ "$MODE" == "basic" ]] && TESS=" tesseract"
 MISS=""
-for b in Xephyr openbox xdotool wmctrl xclip xdpyinfo; do command -v "$b" >/dev/null 2>&1 || MISS="$MISS $b"; done
+for b in Xephyr openbox xdotool wmctrl xclip xdpyinfo xkbcomp; do command -v "$b" >/dev/null 2>&1 || MISS="$MISS $b"; done
 [[ "$MODE" == "basic" ]] && { command -v tesseract >/dev/null 2>&1 || MISS="$MISS tesseract"; }
 if [[ -z "$MISS" ]]; then
   echo "▶ System tools present (Xephyr, openbox, xdotool, wmctrl, xclip) ✓"
@@ -35,13 +35,13 @@ elif command -v apt-get >/dev/null 2>&1; then
     echo "✗ apt failed — run it yourself, then re-run: sudo apt-get install -y $APT_PKGS"; exit 1; }
 elif command -v dnf >/dev/null 2>&1; then
   echo "▶ Missing:$MISS — install with dnf, then re-run this script:"
-  echo "    sudo dnf install -y xorg-x11-server-Xephyr openbox scrot xorg-x11-utils xdotool wmctrl xclip$TESS"; exit 1
+  echo "    sudo dnf install -y xorg-x11-server-Xephyr openbox scrot xorg-x11-utils xorg-x11-xkb-utils xdotool wmctrl xclip$TESS"; exit 1
 elif command -v pacman >/dev/null 2>&1; then
   echo "▶ Missing:$MISS — install with pacman, then re-run this script:"
-  echo "    sudo pacman -S --needed xorg-server-xephyr openbox scrot xorg-xdpyinfo xdotool wmctrl xclip$TESS"; exit 1
+  echo "    sudo pacman -S --needed xorg-server-xephyr openbox scrot xorg-xdpyinfo xorg-xkbcomp xorg-setxkbmap xdotool wmctrl xclip$TESS"; exit 1
 else
   echo "▶ Missing:$MISS — install these tools with your package manager, then re-run:"
-  echo "    Xephyr, openbox, scrot, xdpyinfo (x11-utils), xdotool, wmctrl, xclip$TESS"; exit 1
+  echo "    Xephyr, openbox, scrot, xdpyinfo (x11-utils), xkbcomp + setxkbmap (x11-xkb-utils), xdotool, wmctrl, xclip$TESS"; exit 1
 fi
 
 # ---- python env ----

@@ -49,6 +49,13 @@ Unix socket (`$XDG_RUNTIME_DIR/glovebox-vision.sock`); the server processes beco
 
 Ordering: landed right after the MCP SDK 2.x migration, both in 0.4.0.
 
+## 0.4.0 — host bridge (done 2026-11-14, unreleased)
+
+Found by the maintainer typing into a sandbox window on a Slovenian keyboard: no `@` (Xephyr
+maps AltGr as plain Alt) and no copy/paste with the desktop (separate X servers). Fixed with a
+per-instance bridge process (`host_bridge.py`): host keymap copied and kept equal, clipboard
+text mirrored both ways. Not done: images on the clipboard, the PRIMARY selection.
+
 ## 0.4.x — candidates, not yet committed
 
 - `navigate(url)` / `page_text()` over the CDP port that already exists for uploads — exact

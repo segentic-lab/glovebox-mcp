@@ -52,6 +52,7 @@ from mcp.server.mcpserver.utilities.types import Image as MCPImage
 import mss
 from PIL import Image, ImageChops, ImageDraw
 
+import host_bridge
 import vision
 import vision_service
 from _version import __version__
@@ -84,6 +85,9 @@ BROWSERS = ("chromium", "chromium-browser", "chrome", "google-chrome", "google-c
 VISION = vision.resolve()          # {requested, effective, ready, reason, fallback}
 _OMNI = vision.OmniParser()        # in-process fallback when the shared service is unavailable
 USE_SERVICE = os.environ.get("GLOVEBOX_VISION_SERVICE", "1").strip().lower() not in ("0", "false", "no", "off")
+# Host <-> instance bridge: one detached process per instance mirrors the clipboard and keeps the
+# keymap equal to the host's (see host_bridge.py). The env var keeps its historical name.
+CLIP_SYNC = os.environ.get("GLOVEBOX_CLIPBOARD_SYNC", "1").strip().lower() not in ("0", "false", "no", "off")
 _SERVICE_FAILED_AT = [0.0]         # back off re-spawn attempts after a failure
 
 
@@ -272,11 +276,30 @@ def _host_env() -> dict:
     return e
 
 
+def _bridge_host(n) -> tuple:
+    """Make instance n usable by a PERSON too: copy the host keymap (AltGr characters) and start
+    the clipboard bridge. Returns (keyboard dict, clipboard_sync bool). Never raises — a failed
+    bridge is reported in the keyboard dict / as False, the instance is still usable by the agent."""
+    try:
+        kb = host_bridge.apply_keymap(_disp(n), HOST, _host_env())
+    except Exception as e:   # noqa: BLE001 — bridging must never take the launch down
+        kb = {"method": "xephyr-default", "host_layout": "", "verified": False,
+              "warning": f"keymap copy failed: {e!r}"}
+    clip = False
+    if CLIP_SYNC:
+        try:
+            clip = host_bridge.ensure_running(n, HOST, _host_env()) and bool(shutil.which("xclip"))
+        except Exception:   # noqa: BLE001
+            clip = False
+    return kb, clip
+
+
 def _register_existing():
     if _up(1) and 1 not in INSTANCES:
         INSTANCES[1] = {"name": "sandbox", "command": "(start-display.sh)", "size": "?",
                         "xephyr_pid": None, "app_pid": None}
         _files_dir(1)
+        _bridge_host(1)   # idempotent: the keymap copy is exact, the bridge is lock-guarded
 
 
 def _instance_rows():
@@ -287,7 +310,7 @@ def _instance_rows():
         info = INSTANCES.get(n, {})
         rows.append({"instance": n, "display": _disp(n), "name": info.get("name", "?"),
                      "command": info.get("command", "(unknown)"), "up": _up(n),
-                     "launched_here": n in _LAUNCHED})
+                     "launched_here": n in _LAUNCHED, "clipboard_sync": host_bridge.running(n)})
     return rows
 
 
@@ -485,8 +508,14 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
     debug port (needed by upload_file). Other GTK apps get D-Bus isolation so they render on this
     display, not the host.
 
-    Returns {"ok", "instance", "display", "name", "files_dir", "width", "height", "warnings": [...]}
-    — pass that instance id to every control tool. Fails (isError) if Xephyr can't start on the
+    Returns {"ok", "instance", "display", "name", "files_dir", "width", "height", "warnings": [...],
+    "keyboard": {method, host_layout, verified}, "clipboard_sync": bool} — pass that instance id to every
+    control tool. "keyboard" says how the window got the host's keyboard layout ("host-keymap" =
+    exact copy, verified against the host; Xephyr alone maps AltGr as plain Alt, so a person could
+    not type @ { } [ ] on Slovenian/German/… layouts); "clipboard_sync" is true when the per-instance
+    host bridge runs (it mirrors text between the host and instance clipboards and keeps the
+    keymap equal to the host's; GLOVEBOX_CLIPBOARD_SYNC=0 disables it). Neither affects the
+    agent's own type_text/clipboard. Fails (isError) if Xephyr can't start on the
     host display, the command doesn't exist, or the app exits immediately (its stderr tail is
     quoted; app_log(instance) has more). "warnings" is non-empty when the window manager (openbox)
     is missing — Xephyr then ignores pointer motion, so clicks would land in the screen center.
@@ -525,6 +554,9 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
         warnings.append("openbox (window manager) is not installed: Xephyr ignores xdotool pointer motion "
                         "without a WM, so clicks land in the screen center — install openbox")
     time.sleep(0.5)
+    keyboard, clip_sync = _bridge_host(n)
+    if keyboard.get("warning"):
+        warnings.append(keyboard["warning"])
     appenv, args, base = _app_env_args(n, command)
     app, err, fix = _spawn_checked("launch_app", n, args, appenv, _app_log(n),
                                    "use a command that exists in PATH (e.g. 'chromium', 'xmessage hi')")
@@ -539,14 +571,16 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
     INSTANCES[n].update(name=name or base, app_pid=app.pid)
     W, H = _geometry(n)
     return _ok("launch_app", n, name=INSTANCES[n]["name"], command=command,
-               files_dir=_files_dir(n), width=W, height=H, warnings=warnings)
+               files_dir=_files_dir(n), width=W, height=H, warnings=warnings,
+               keyboard=keyboard, clipboard_sync=clip_sync)
 
 
 @mcp.tool()
 def list_instances() -> str:
     """List all instances (running app windows): id, display, name, command, up, launched_here.
 
-    Returns {"ok", "count", "instances": [{instance, display, name, command, up, launched_here}, …]}.
+    Returns {"ok", "count", "instances": [{instance, display, name, command, up, launched_here,
+    clipboard_sync}, …]}.
     Probes displays :1–:12 for sandboxes started outside this server (e.g. start-display.sh or
     another agent's server), so it also finds instances this process didn't launch (their
     name/command show as unknown, launched_here=false). Use it to discover what you can drive
@@ -850,8 +884,9 @@ def type_text(text: str, instance: int = 1, observe: str = "none", settle_ms: in
     Returns {"ok", "action", "instance", "detail", "method": "xdotool"|"clipboard"}.
     Pure ASCII is typed via xdotool; text with any non-ASCII char (č/š/ž …) is inserted via the
     clipboard + ctrl+v, because xdotool's synthetic unicode keystrokes get silently dropped by
-    some toolkits (e.g. Inkscape's GTK canvas) even though they work in browsers (that route
-    leaves the text in the instance's clipboard — see clipboard()). Terminals that paste with
+    some toolkits (e.g. Inkscape's GTK canvas) even though they work in browsers (the previous
+    clipboard text is put back afterwards, so the typed text does not leak to the host clipboard
+    through the bridge — see clipboard()). Terminals that paste with
     shift+Insert instead of ctrl+v need press_keys after clipboard(action='set'). Fails (isError)
     rather than silently losing characters if xclip is missing for non-ASCII text.
     `observe`/`settle_ms`: see click()."""
@@ -862,6 +897,8 @@ def type_text(text: str, instance: int = 1, observe: str = "none", settle_ms: in
                                "typing it via xdotool would silently drop characters in some toolkits",
                   fix="install xclip (e.g. `sudo apt install xclip`) or send ASCII-only text",
                   instance=instance)
+        prev = _xclip(instance, "type_text", "-o")          # restored below: with the host clipboard
+        prev = prev.stdout if prev.returncode == 0 else None  # bridge, agent text must not linger there
         r = _xclip(instance, "type_text", "-i", input=text.encode("utf-8"))
         if r.returncode != 0:
             if not _up(instance):
@@ -869,6 +906,9 @@ def type_text(text: str, instance: int = 1, observe: str = "none", settle_ms: in
             _fail("type_text", "xclip failed to set the clipboard", instance=instance)
         time.sleep(0.05)
         _xdo(instance, "type_text", "key", "ctrl+v", opts=("--clearmodifiers",))
+        if prev is not None:
+            time.sleep(0.15)   # let the app finish reading the selection before it changes again
+            _xclip(instance, "type_text", "-i", input=prev)
         method = "clipboard"
     else:
         _xdo(instance, "type_text", "type", text, opts=("--clearmodifiers", "--delay", "15"))
@@ -886,7 +926,9 @@ def clipboard(action: str = "get", text: str = "", instance: int = 1) -> str:
     no screenshot. "empty": true means nothing (or non-text data) is on the clipboard.
     action='set' puts `text` on the clipboard (then press_keys('ctrl+v') or 'shift+Insert' in
     terminals) and returns {"ok", "instance", "length"}. Each instance has its own clipboard
-    (separate X display). Fails (isError) if xclip is missing or the instance is down."""
+    (separate X display); the bridge started by launch_app mirrors TEXT between it and the host's
+    clipboard within ~1 s (so a person can copy/paste across; GLOVEBOX_CLIPBOARD_SYNC=0 turns it
+    off). Fails (isError) if xclip is missing or the instance is down."""
     if action not in ("get", "set"):
         _fail("clipboard", f"unknown action '{action}'", fix="use action='get' or 'set'", instance=instance)
     if not shutil.which("xclip"):
@@ -1191,8 +1233,9 @@ def status() -> str:
     service: {running, pid, loaded, served, in_flight, idle_s, …} — the shared per-machine
     OmniParser process (one GPU load for all agents; starts on first use, idle-exits)},
     tesseract: {binary, pytesseract, langs, lang, ready, reason}},
-    "instances": [...same as list_instances], "deps": {xdotool, xclip, xephyr, openbox, wmctrl,
-    xdpyinfo, dbus_run_session, tesseract, nvidia_smi: true|false}}.
+    "instances": [...same as list_instances], "keyboard": {host_layout, override}, "clipboard_sync":
+    {enabled, poll_s}, "deps": {xdotool, xclip, xephyr, openbox, wmctrl, xdpyinfo, xkbcomp,
+    setxkbmap, dbus_run_session, tesseract, nvidia_smi: true|false}}.
     "vision.effective" is the grounding backend actually in use (none|basic|local); when
     GLOVEBOX_VISION=auto it is the best READY one and "reason" says why (e.g. OmniParser weights
     missing, GPU too small). The GPU check is the same preflight parse_screen uses. No side effects."""
@@ -1209,12 +1252,15 @@ def status() -> str:
     tess = vision.tesseract_info()
     deps = {k: bool(shutil.which(b)) for k, b in (
         ("xdotool", "xdotool"), ("xclip", "xclip"), ("xephyr", "Xephyr"), ("openbox", "openbox"),
-        ("wmctrl", "wmctrl"), ("xdpyinfo", "xdpyinfo"), ("dbus_run_session", "dbus-run-session"),
-        ("tesseract", "tesseract"), ("nvidia_smi", "nvidia-smi"))}
+        ("wmctrl", "wmctrl"), ("xdpyinfo", "xdpyinfo"), ("xkbcomp", "xkbcomp"), ("setxkbmap", "setxkbmap"),
+        ("dbus_run_session", "dbus-run-session"), ("tesseract", "tesseract"), ("nvidia_smi", "nvidia-smi"))}
+    keyboard = {"host_layout": host_bridge.display_layout(HOST, _host_env()),
+                "override": os.environ.get("GLOVEBOX_KEYBOARD", "")}
     return _ok("status", version=__version__, host_display=HOST, tmp_dir=TMP,
                cleanup_on_exit=_truthy(os.environ.get("GLOVEBOX_CLEANUP_ON_EXIT", "")),
                vision={**VISION, "gpu": gpu, "omniparser": omni, "tesseract": tess},
-               instances=_instance_rows(), deps=deps)
+               instances=_instance_rows(), keyboard=keyboard,
+               clipboard_sync={"enabled": CLIP_SYNC, "poll_s": host_bridge.POLL_S}, deps=deps)
 
 
 if __name__ == "__main__":

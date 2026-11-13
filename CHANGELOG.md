@@ -9,6 +9,19 @@ reported to MCP clients during the initialize handshake.
 ## [0.4.0] - Unreleased
 
 ### Added
+- **Host bridge** (`host_bridge.py`): every instance is now usable by a
+  person as well as by the agent. `launch_app` (and `start-display.sh`)
+  copy the host's keyboard layout into the new display and start one
+  detached bridge process per instance that mirrors clipboard TEXT between
+  the host and the instance (both directions, ~0.5 s) and keeps the keymap
+  equal to the host's (re-copied within 5 s if Xephyr reloads its own map or
+  the host layout is switched). The launch result carries
+  `keyboard: {method, host_layout, verified}` and `clipboard_sync`;
+  `list_instances` rows carry `clipboard_sync`; `status()` reports the host
+  layout and the `xkbcomp`/`setxkbmap` deps. `GLOVEBOX_CLIPBOARD_SYNC=0`
+  turns the bridge off, `GLOVEBOX_KEYBOARD=si` forces a layout. The bridge
+  exits by itself when the display goes down; tests cover the sync policy
+  without X and the real thing on :99. New system package: `x11-xkb-utils`.
 - **Shared vision service** (`vision_service.py`): in `local` mode OmniParser
   is loaded by ONE process per machine and served over a Unix socket, instead
   of every agent's server loading YOLO + Florence-2 + easyocr into the GPU
@@ -23,6 +36,23 @@ reported to MCP clients during the initialize handshake.
   disables it; `python vision_service.py status|stop`. 10 tests cover framing,
   lifecycle (spawn once, reuse, idle-exit, shutdown), error propagation and
   the server's client/fallback paths without a GPU (`--fake` parser).
+
+### Fixed
+- **AltGr characters could not be typed by hand into a sandbox window**
+  (`@ { } [ ] | ~ €` on Slovenian/Croatian/German/… layouts). Xephyr copies
+  the host's keysyms but files the AltGr key (keycode 108) under plain
+  `Alt`, so AltGr+V reached the app as Alt+v. Reproduced with a key logger
+  inside the instance, fixed by copying the host's complete keymap
+  (`xkbcomp HOST INSTANCE`); the e2e test asserts the bare-Xephyr bug and
+  its absence after launch. The agent's `type_text` was never affected
+  (xdotool addresses keysyms).
+- **Copy/paste between the desktop and a sandbox window did nothing** — an
+  X selection lives in one X server. Now bridged (text) by the per-instance
+  bridge; on Wayland desktops the compositor relays it on to native apps
+  (verified with KDE's klipper).
+- `type_text` leaves the clipboard as it found it after its unicode paste,
+  so agent text does not end up on the person's host clipboard through the
+  bridge.
 
 ### Changed
 - **MCP Python SDK 2.x** (`mcp[cli]>=2.0,<3`; 1.x is no longer supported).

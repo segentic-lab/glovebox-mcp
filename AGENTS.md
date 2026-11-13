@@ -78,9 +78,15 @@ in one call.
 
 ## Rules that will bite you if ignored
 
-- **Typing** — `type_text` already handles unicode (č/š/ž…) by pasting non-ASCII via the clipboard.
-  Just call it; don't type special characters key-by-key. In terminals paste with
-  `press_keys("shift+Insert")` after `clipboard(action="set")`.
+- **Typing** — `type_text` already handles unicode (č/š/ž…) by pasting non-ASCII via the clipboard
+  (and puts the previous clipboard text back afterwards). Just call it; don't type special
+  characters key-by-key. In terminals paste with `press_keys("shift+Insert")` after
+  `clipboard(action="set")`.
+- **The person can type and paste into the window too** — `launch_app` copies the host keyboard
+  layout into the instance (`keyboard.verified` in the result) and starts a bridge that mirrors
+  TEXT between the host and instance clipboards (`clipboard_sync`). If a user reports "@ does not
+  work" or "paste from my desktop does nothing", check those two fields in `list_instances` /
+  the launch result and `status().deps.xkbcomp` before anything else.
 - **File uploads (browser)** — NEVER click a page's "upload / choose file" button expecting a dialog.
   The native file picker is invisible to you and **hangs the browser**. Use **`upload_file(path,
   instance)`** instead. If the page inserts its `<input type=file>` only after you click an upload

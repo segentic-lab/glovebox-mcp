@@ -8,6 +8,7 @@ Everything self-skips when no X server can be started, so the smoke tests still 
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -258,9 +259,10 @@ def test_clipboard_roundtrip_and_type_text_unicode(x99):
             text2 = "Črnomelj — šž"
             r = await s.call_tool("type_text", {"text": text2, "instance": DISP})
             assert payload(r)["method"] == "clipboard"
-            # the clipboard on :99 must hold the exact unicode text (this is what ctrl+v pastes)
+            # the previous clipboard text is restored after the paste (so agent text does not leak
+            # to the host clipboard through the bridge); the paste itself is what ctrl+v received
             out = subprocess.run(["xclip", "-o", "-selection", "clipboard"], env=XENV, capture_output=True, timeout=5)
-            assert out.stdout.decode("utf-8") == text2
+            assert out.stdout.decode("utf-8") == text
     asyncio.run(run())
 
 
@@ -408,6 +410,76 @@ def test_launch_app_lifecycle(x99):
             r = await s.call_tool("close_instance", {"instance": n})
             assert r.is_error  # closing twice must not pretend success
     asyncio.run(run())
+
+
+@pytest.mark.skipif(not (shutil.which("Xephyr") and HAS_XMESSAGE and shutil.which("xkbcomp")
+                         and shutil.which("setxkbmap") and shutil.which("xmodmap")),
+                    reason="Xephyr/xmessage/x11-xkb-utils/xmodmap not installed")
+def test_launch_app_bridges_keyboard_and_clipboard(x99):
+    """A launched instance must carry the HOST keymap (Xephyr alone files AltGr under Mod1, so
+    AltGr+V is Alt+v and no '@' on Slovenian/German/... layouts) and mirror the host clipboard."""
+    import host_bridge
+    host = f":{DISP}"
+    subprocess.run(["setxkbmap", "-display", host, "-layout", "si"], check=True, timeout=10)
+    try:
+        # the bug, reproduced on a bare Xephyr: AltGr (keycode 108 = <RALT>) lands in Mod1
+        bare = subprocess.Popen(["Xephyr", ":97", "-screen", "320x200", "-ac"], env=XENV,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(40):
+                if _display_up(":97"):
+                    break
+                time.sleep(0.25)
+            pm = subprocess.run(["xmodmap", "-display", ":97", "-pm"], capture_output=True, text=True, timeout=10).stdout
+            assert re.search(r"mod1.*\(0x6c\)", pm), pm
+        finally:
+            bare.terminate()
+            bare.wait(timeout=5)
+
+        async def run():
+            async with glovebox({"GLOVEBOX_HOST_DISPLAY": host}) as (s, _):
+                r = await s.call_tool("launch_app", {"command": "xmessage -center bridge-e2e", "size": "640x480"})
+                p = payload(r)
+                assert not r.is_error, p
+                n, disp = p["instance"], p["display"]
+                try:
+                    assert p["keyboard"]["method"] == "host-keymap", p["keyboard"]
+                    pm = subprocess.run(["xmodmap", "-display", disp, "-pm"], capture_output=True, text=True, timeout=10).stdout
+                    assert not re.search(r"mod1.*\(0x6c\)", pm), pm          # AltGr is no longer plain Alt
+                    pke = subprocess.run(["xmodmap", "-display", disp, "-pke"], capture_output=True, text=True, timeout=10).stdout
+                    assert re.search(r"^keycode +108 = ISO_Level3_Shift", pke, re.M), pke
+
+                    assert p["clipboard_sync"] is True and host_bridge.running(n)
+                    r = await s.call_tool("list_instances", {})
+                    assert [i for i in payload(r)["instances"] if i["instance"] == n][0]["clipboard_sync"] is True
+
+                    def host_clip():
+                        return subprocess.run(["xclip", "-o", "-selection", "clipboard"], env=XENV,
+                                              capture_output=True, timeout=5).stdout.decode("utf-8", "replace")
+                    subprocess.run(["xclip", "-i", "-selection", "clipboard"], env=XENV, input="from host čž".encode(),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                    for _ in range(40):                                        # host -> instance
+                        r = await s.call_tool("clipboard", {"action": "get", "instance": n})
+                        if payload(r)["text"] == "from host čž":
+                            break
+                        await asyncio.sleep(0.2)
+                    assert payload(r)["text"] == "from host čž", payload(r)
+                    await s.call_tool("clipboard", {"action": "set", "text": "from instance", "instance": n})
+                    for _ in range(40):                                        # instance -> host
+                        if host_clip() == "from instance":
+                            break
+                        await asyncio.sleep(0.2)
+                    assert host_clip() == "from instance"
+                finally:
+                    r = await s.call_tool("close_instance", {"instance": n})
+                for _ in range(50):                                            # the bridge exits with the display
+                    if not host_bridge.running(n):
+                        break
+                    await asyncio.sleep(0.2)
+                assert not host_bridge.running(n)
+        asyncio.run(run())
+    finally:
+        subprocess.run(["setxkbmap", "-display", host, "-layout", "us"], timeout=10)
 
 
 @pytest.mark.skipif(not (shutil.which("Xephyr") and HAS_XMESSAGE), reason="Xephyr or xmessage not installed")
