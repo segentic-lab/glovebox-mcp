@@ -386,16 +386,26 @@ def install_omniparser(log=print) -> str:
     cap = os.path.join(OMNI_WEIGHTS, "icon_caption")
     if os.path.isdir(cap) and not os.path.isdir(OMNI_CAPTION):
         os.rename(cap, OMNI_CAPTION)
-    # OmniParser imports PaddleOCR unconditionally; we use easyocr, so make it optional (idempotent).
+    # OmniParser's util/utils.py imports PaddleOCR (we use easyocr) and the OpenAI SDK (for its
+    # GPT captioning mode, which we never call) unconditionally — make both optional (idempotent),
+    # so the local backend does not drag in packages it never uses.
     u = os.path.join(OMNI_DIR, "util", "utils.py")
     if os.path.isfile(u):
         s = open(u).read()
-        if "from paddleocr import PaddleOCR\n" in s:
-            s = s.replace("from paddleocr import PaddleOCR\n",
-                          "try:\n    from paddleocr import PaddleOCR\nexcept Exception:\n    PaddleOCR = None\n")
+        patched = []
+        # anchored at column 0: once wrapped, the import is indented and must not be wrapped again
+        if re.search(r"^from paddleocr import PaddleOCR\n", s, re.M):
+            s = re.sub(r"^from paddleocr import PaddleOCR\n",
+                       "try:\n    from paddleocr import PaddleOCR\nexcept Exception:\n    PaddleOCR = None\n", s, count=1, flags=re.M)
             s = re.sub(r"(rec_batch_num=1024\))\n", r"\1 if PaddleOCR is not None else None\n", s, count=1)
+            patched.append("PaddleOCR")
+        if re.search(r"^from openai import AzureOpenAI\n", s, re.M):
+            s = re.sub(r"^from openai import AzureOpenAI\n",
+                       "try:\n    from openai import AzureOpenAI\nexcept Exception:\n    AzureOpenAI = None\n", s, count=1, flags=re.M)
+            patched.append("openai")
+        if patched:
             open(u, "w").write(s)
-            log("▶ patched OmniParser util/utils.py (PaddleOCR optional)")
+            log(f"▶ patched OmniParser util/utils.py ({', '.join(patched)} optional)")
     info = omniparser_info()
     log(f"✓ OmniParser installed — ready: {info['ready']} ({info['reason']})")
     return OMNI_DIR

@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
+## [Unreleased]
+
+### Fixed
+- `local` mode failed on a fresh install with `OmniParser import failed: No
+  module named 'openai'`: OmniParser's `util/utils.py` imports the OpenAI SDK
+  unconditionally for a GPT-captioning mode we never call. The installer now
+  makes that import optional (as it already did for PaddleOCR), and the
+  patch is anchored so re-running `install-omniparser` cannot wrap the same
+  import twice (which produced a syntax error). First real-GPU run of the
+  shared vision service on an RTX A5000 Laptop (16 GB): models load in 12 s,
+  a 1440x900 parse takes 1.7 s warm, the service holds 2.2 GB VRAM.
+
 ## [0.4.0] - 2026-11-14
 
 ### Added
