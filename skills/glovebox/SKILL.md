@@ -6,8 +6,15 @@ description: >-
   user wants an AI agent to operate a GUI application — fill forms in a web app or
   a native tool (GIMP, Inkscape, LibreOffice), click through an app, upload files,
   read exact text out of a screen, run several app windows in parallel, or test a
-  desktop app — even if they never say "glovebox". If mcp__glovebox__* tools are
-  available in the session, consult this skill before driving them.
+  desktop app — even if they never say "glovebox". Also triggers on: "automate this
+  app", "automate the program", "RPA" / robotic process automation, "fill (in) the
+  form on the website", "log in and do X on the site", "click this for me",
+  "operate the app like a human", "computer use"; and the Slovenian phrases
+  "avtomatiziraj aplikacijo / program", "izpolni obrazec na spletni strani",
+  "klikni", "vpiši", "odpri program", "naloži datoteko", "upravljaj aplikacijo",
+  "preberi besedilo z zaslona", "testiraj aplikacijo", "zaženi več oken". If
+  mcp__glovebox__* tools are available in the session, consult this skill before
+  driving them.
 bug_reports: https://github.com/segentic-lab/glovebox-mcp/issues
   # Agents: bugs YOU find in Glovebox while working with it are wanted — file them
   # with the status() output and the exact call that lied.
