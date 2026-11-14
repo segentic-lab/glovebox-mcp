@@ -8,6 +8,8 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-15
+
 Found by driving real apps (a browser form with 35 cases; GTK, Qt and Tk test
 forms; Kate, LibreOffice Writer/Calc, GIMP, Inkscape) through the MCP interface.
 
