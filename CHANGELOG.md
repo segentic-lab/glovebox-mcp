@@ -16,6 +16,29 @@ reported to MCP clients during the initialize handshake.
   paths, `..` and symlinks out are refused), atomic, refuses to replace an
   existing file without `overwrite=true`. 29 tools. (Glama's completeness
   review listed "no file-write tool" as a gap.)
+- `fill(text, x, y | element, submit, verify)` — click a field, replace its
+  content and read the value back in one call (`verified: true|false|null`).
+  Browsers are read through the DOM, other apps through select-all + copy
+  behind a sentinel (clipboard restored). A click that missed the field or a
+  field left empty fails and nothing is submitted. 30 tools. (A dogfooding
+  agent repeated click → select-all → paste → screenshot about 30 times in
+  one session.)
+- `hit` on `click` / `double_click` / `click_element` / `fill`: in
+  Chromium-family browsers, the element under the point (role, name,
+  `checked_before`, `disabled`, `href`), read from the DOM before the click;
+  `{"role": "browser-ui"}` outside the page. Absent for native apps.
+- `observe_region="x,y,w,h"` on every tool that takes `observe`: the returned
+  screenshot is cropped to that rectangle (implies `observe="screenshot"`,
+  validated before the action).
+- `scroll(direction="up"|"down"|"left"|"right")` next to the signed amount;
+  the reply names the `direction` actually scrolled.
+- `warnings` on action tools when the pointer is not where the server left
+  it — a person or another agent is using the instance. Pointer movement
+  only; typing cannot be detected.
+- `status()` returns `tips`, and the server's MCP `instructions` name
+  `find_elements` / `click_element` / `wait_for_text` / `fill`: clients that
+  load tool schemas lazily never showed them to the agent, which then
+  clicked by pixel and misclicked.
 
 ## [0.5.1] - 2026-11-14
 

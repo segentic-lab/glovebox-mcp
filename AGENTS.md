@@ -67,6 +67,7 @@ in one call.
 | Find one element by its text | `find_elements("Sign in", instance, type="button")` → `click_element(id)` — no 300-element scan |
 | Wait for a page/dialog by its text | `wait_for_text("Welcome", instance)` → `satisfied` / `timed_out` (honest) |
 | Click a known pixel | `click(x, y, instance, observe="screenshot")` — `count=2` double, `modifiers="ctrl"` ctrl-click |
+| Set a form field (click + replace + read back) | `fill("Nadja Kovačič", x, y, instance)` or `fill("…", element=<id>)` — check `verified`; a miss fails instead of typing into nowhere |
 | Type into the focused field | `type_text("…", instance)` — unicode-safe automatically; `clear=True` replaces, `submit=True` adds Return |
 | Browser: URL, navigate, page text, JS | `browser(action="info"/"navigate"/"text"/"eval", instance, url=…, js=…)` — exact, no OCR |
 | Switch windows / dialogs, resize, close | `window_info(instance)` → `manage_window("activate"/"close"/"resize", instance, window_id)` |
@@ -74,7 +75,7 @@ in one call.
 | Keys / shortcuts / sequences | `press_keys("Return" / "ctrl+a" / "ctrl+a Delete", instance)` |
 | Read exact text out of an app | select → `press_keys("ctrl+c")` → `clipboard(action="get", instance)` |
 | Put text on the clipboard | `clipboard(action="set", text="…", instance)` → `press_keys("ctrl+v")` |
-| Scroll | `scroll(amount, instance, x=…, y=…)` (positive = up, negative = down; `axis="horizontal"` sideways; max 100, `clamped` flagged) |
+| Scroll | `scroll(5, instance, direction="down", x=…, y=…)` — or signed `amount` (positive = up, negative = down; `axis="horizontal"` sideways; max 100, `clamped` flagged) |
 | Drag / draw / select / slider | `drag(x1, y1, x2, y2, instance, steps=10)` |
 | Double-click / hover (menus, tooltips) | `double_click(x, y, instance)` · `move_mouse(x, y, instance)` then `screenshot` |
 | Give the sandbox a file you produced | `put_file("data.csv", "a;b\n1;2\n", instance)` (binary: `encoding="base64"`) → `open_file("data.csv")` / `upload_file("data.csv")` |
@@ -86,6 +87,20 @@ in one call.
 
 ## Rules that will bite you if ignored
 
+- **Prefer labels to pixels** — with a vision backend, `find_elements("Objavi")` →
+  `click_element(id)` and `wait_for_text("Shranjeno")` beat guessing coordinates and sleeping.
+  If your client loads tools lazily, load `find_elements`, `click_element`, `wait_for_text` and
+  `fill` up front.
+- **Read `hit` after a browser click** — `click`/`double_click`/`click_element`/`fill` return the
+  DOM element that was under the point (`role`, `name`, `checked_before`, `href`;
+  `{"role": "browser-ui"}` = toolbar/tab strip). If it is not what you meant, you misclicked.
+  Native apps have no `hit`.
+- **See only what changed** — `observe_region="x,y,w,h"` on any action returns just that
+  rectangle (implies `observe="screenshot"`); use it for the field you just edited.
+- **`warnings` about the pointer** mean a person (or another agent) moved the mouse in your
+  instance since your last action: focus and coordinates may be stale — screenshot first. Only
+  pointer movement is detectable, not typing. Browser profiles are per instance
+  (`profiles/<browser>-<N>`), so an instance you launched has its own logins.
 - **An action is never un-done by a failed observation** — `click(observe="parse")` whose parse
   fails returns `ok: true, observed: false, observe_error: …`. The click happened: do NOT repeat
   it; screenshot instead.

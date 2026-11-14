@@ -16,7 +16,7 @@ EXPECTED_TOOLS = {
     "launch_app", "list_instances", "close_instance", "get_screen_size", "screenshot",
     "parse_screen", "click", "drag", "double_click", "click_element", "type_text",
     "upload_file", "open_file", "list_files", "press_keys", "move_mouse", "scroll",
-    "wait_ms", "status", "find_elements", "wait_for_text", "start_app", "browser", "manage_window", "put_file",
+    "wait_ms", "status", "find_elements", "wait_for_text", "start_app", "browser", "manage_window", "put_file", "fill",
     # 0.3.0
     "clipboard", "wait_for_stable", "window_info", "app_log",
 }
@@ -35,7 +35,7 @@ def _vision(monkeypatch, **kw):
 def test_all_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
-    assert len(names) == 29
+    assert len(names) == 30
 
 
 def test_descriptions_are_agent_first():
@@ -305,3 +305,99 @@ def test_put_file_writes_only_inside_the_staging_folder(tmp_path, monkeypatch):
     with pytest.raises(ToolError):                                             # host display / out of range
         server.put_file("f.txt", "x", instance=0)
     assert [f for f in os.listdir(tmp_path / "files" / "7") if ".put-" in f] == []   # no temp files left
+
+
+# ---------- agent feedback round: fill, hit, observe_region, scroll direction, foreign input ----------
+def _no_browser(monkeypatch):
+    """No CDP browser, no real pointer: the click helpers must work for native apps too."""
+    monkeypatch.setattr(server, "_hit", lambda n, x, y: None)
+    monkeypatch.setattr(server, "_pointer", lambda n: None)
+
+
+def test_observe_region_is_validated_before_acting_and_implies_screenshot():
+    server._set_geometry(43, 800, 600)
+    try:
+        assert server._validate_observe("click", 43, "none") == "none"
+        assert server._validate_observe("click", 43, "none", "10,20,100,50") == ("screenshot", (10, 20, 110, 70))
+        for bad, region in (("screenshot", "700,0,200,50"), ("none", "nope"), ("parse", "0,0,10,10")):
+            with pytest.raises(ToolError) as e:
+                server._validate_observe("click", 43, bad, region)
+            assert "not performed" in json.loads(str(e.value))["error"]
+    finally:
+        server._GEOM.pop(43, None)
+
+
+def test_scroll_direction_sets_axis_and_sign(monkeypatch):
+    _vision(monkeypatch)
+    _no_browser(monkeypatch)
+    sent = []
+    monkeypatch.setattr(server, "_xdo", lambda n, action, sub, *a, **kw: sent.append((sub, a)))
+    for kw, button, direction in (({"direction": "down"}, 5, "down"), ({"direction": "up", "amount": -4}, 4, "up"),
+                                  ({"direction": "right"}, 7, "right"), ({"amount": -2}, 5, "down"),
+                                  ({"amount": 2, "axis": "horizontal"}, 6, "left")):
+        sent.clear()
+        p = json.loads(server.scroll(instance=7, **kw))
+        assert sent[-1] == ("click", (button,)) and p["direction"] == direction
+    with pytest.raises(ToolError) as e:
+        server.scroll(3, 7, direction="sideways")
+    assert "nothing was scrolled" in json.loads(str(e.value))["error"] and not sent[1:]
+
+
+def test_foreign_pointer_movement_is_reported_once(monkeypatch):
+    where = {"p": (10, 10)}
+    monkeypatch.setattr(server, "_pointer", lambda n: where["p"])
+    server._PTR.pop(44, None)
+    try:
+        assert server._foreign_input(44) == {}            # first sight: nothing to compare with
+        server._PTR[44] = (100, 100)                      # this server left it here
+        where["p"] = (101, 99)
+        assert server._foreign_input(44) == {}            # jitter is not a person
+        where["p"] = (400, 300)
+        w = server._foreign_input(44)
+        assert "another agent" in w["warnings"][0] and "[400, 300]" in w["warnings"][0]
+        assert server._foreign_input(44) == {}            # reported once, not on every later call
+    finally:
+        server._PTR.pop(44, None)
+
+
+def test_click_reports_the_element_it_hit(monkeypatch):
+    _vision(monkeypatch)
+    monkeypatch.setattr(server, "_pointer", lambda n: None)
+    monkeypatch.setattr(server, "_click_at", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_hit", lambda n, x, y: {"role": "checkbox", "name": "Oglas", "source": "browser-dom"})
+    assert json.loads(server.click(5, 5, 7))["hit"]["role"] == "checkbox"
+    monkeypatch.setattr(server, "_hit", lambda n, x, y: None)          # native app: the key is absent
+    assert "hit" not in json.loads(server.click(5, 5, 7))
+
+
+def test_fill_verdicts(monkeypatch):
+    """fill never reports a field as set unless the read-back says so, and never submits a miss."""
+    _vision(monkeypatch)
+    _no_browser(monkeypatch)
+    keys = []
+    monkeypatch.setattr(server, "_click_at", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_type_into", lambda n, action, text, clear=False: "xdotool")
+    monkeypatch.setattr(server, "_xdo", lambda n, action, sub, *a, **kw: keys.append(a))
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+
+    def run(read, text="Žiga", **kw):
+        monkeypatch.setattr(server, "_read_field", lambda n, action: read)
+        keys.clear()
+        return json.loads(server.fill(text, 10, 10, 7, submit=True, **kw))
+
+    p = run(("Žiga\n", "clipboard", None))
+    assert p["verified"] is True and p["submitted"] is True and keys == [("Return",)]
+    p = run(("Ziga", "browser-dom", "input"))
+    assert p["verified"] is False and p["value"] == "Ziga" and "warning" in p
+    p = run((None, "unreadable", None))
+    assert p["verified"] is None and "note" in p
+    assert run(("anything", "clipboard", None), verify=False)["read_back"] == "skipped"
+    for read, needle in (((None, "browser-dom", "body"), "missed"), (("", "browser-dom", "input"), "still empty")):
+        with pytest.raises(ToolError) as e:
+            run(read)
+        assert needle in json.loads(str(e.value))["error"] and keys == [], "a failed fill must not press Return"
+    with pytest.raises(ToolError) as e:                      # no target: nothing is clicked
+        server.fill("x", instance=7)
+    assert "nothing was done" in json.loads(str(e.value))["error"]
+    with pytest.raises(ToolError):
+        server.fill("x", instance=7, element=3)              # id from no parse

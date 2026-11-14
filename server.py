@@ -74,12 +74,17 @@ TMP = tmp_dir()   # annotated frames + app/Xephyr logs; 0700, ownership-checked 
 
 mcp = MCPServer("glovebox", version=__version__,
                 instructions="Sandboxed computer use: drive real apps inside nested X11 windows. Call status() "
-                             "first; every tool returns JSON with ok/fix; see AGENTS.md in the repo.")
+                             "first; every tool returns JSON with ok/fix. Prefer labels over pixel guesses: "
+                             "find_elements('Save') -> click_element(id), wait_for_text('Done') instead of "
+                             "sleeping, fill(text, x, y) to set a form field and read it back, "
+                             "browser(action='text') for exact page text. click() reports the element it "
+                             "hit in browsers. See AGENTS.md in the repo.")
 
 INSTANCES = {}   # N -> {name, command, size, xephyr_pid, app_pid}
 _LAST = {}       # N -> {element id -> (cx, cy)} from that instance's last parse_screen
 _GEOM = {}       # N -> (W, H, read_at) cached display geometry (bounds checks; refreshed after GEOM_TTL)
 _LAUNCHED = set()  # instances started by THIS process (for optional cleanup on exit)
+_PTR = {}        # N -> (x, y) where THIS server last left the pointer (foreign-input detection)
 _LOCK = threading.RLock()
 _ILOCKS = defaultdict(threading.RLock)   # per-instance: one cursor/keyboard/clipboard = one sequence at a time
 _SCAN_MAX = 24   # highest display :N that list_instances probes for already-running sandboxes
@@ -457,22 +462,22 @@ def _cdp_port(n) -> int:
     return 9222 + int(n)
 
 
-def _cdp_pages(port):
+def _cdp_pages(port, timeout=5):
     import urllib.request
     # ProxyHandler({}) — never route the 127.0.0.1 CDP call through an http_proxy from the env.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    info = json.loads(opener.open(f"http://127.0.0.1:{port}/json", timeout=5).read().decode())
+    info = json.loads(opener.open(f"http://127.0.0.1:{port}/json", timeout=timeout).read().decode())
     return [t for t in info if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
             and not t.get("url", "").startswith("devtools://")]
 
 
 @contextmanager
-def _cdp(port, page_url_contains=""):
+def _cdp(port, page_url_contains="", timeout=15):
     """A CDP session on one page target of the browser listening on 127.0.0.1:port. Yields
     (cmd, target, pages): cmd(method, params) -> result. Targets are listed most-recently-active
     first, so the first one is the tab being looked at unless `page_url_contains` picks."""
     import websocket
-    pages = _cdp_pages(port)
+    pages = _cdp_pages(port, min(5, timeout))
     if page_url_contains:
         pages = [t for t in pages if page_url_contains in t.get("url", "")]
         if not pages:
@@ -482,7 +487,7 @@ def _cdp(port, page_url_contains=""):
     target = pages[0]
     # suppress_origin: Chrome rejects CDP WS handshakes that carry a non-allowlisted Origin header;
     # sending none sidesteps that without opening the port to every origin (--remote-allow-origins).
-    ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=15, suppress_origin=True)
+    ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=timeout, suppress_origin=True)
     seq = {"n": 0}
 
     def cmd(method, params=None):
@@ -914,15 +919,7 @@ def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: 
     W, H = img.width, img.height
     box = None
     if region:
-        try:
-            x, y, w, h = [int(v) for v in region.split(",")]
-            assert w > 0 and h > 0
-        except (ValueError, AssertionError):
-            _fail("screenshot", f"bad region '{region}'", fix="use region='x,y,w,h' with positive w,h", instance=n)
-        if x < 0 or y < 0 or x + w > W or y + h > H:
-            _fail("screenshot", f"region {region} exceeds the {W}x{H} display",
-                  fix=f"keep 0 <= x, x+w <= {W} and 0 <= y, y+h <= {H}", instance=n, width=W, height=H)
-        box = (x, y, x + w, y + h)
+        box = _parse_region("screenshot", n, region, W, H)
         img = img.crop(box)
     if float(scale) < 1.0:
         img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))), Image.LANCZOS)
@@ -976,12 +973,28 @@ def _do_parse(instance: int = 1, box_threshold: float = 0.05, granularity: str =
     return base
 
 
+def _parse_region(action, n, region, W, H, undone=""):
+    """'x,y,w,h' -> (x1, y1, x2, y2) inside the WxH display, or a structured failure."""
+    try:
+        x, y, w, h = [int(v) for v in region.split(",")]
+        assert w > 0 and h > 0
+    except (ValueError, AssertionError):
+        _fail(action, f"bad region '{region}'{undone}", fix="use 'x,y,w,h' with positive w,h", instance=n)
+    if x < 0 or y < 0 or x + w > W or y + h > H:
+        _fail(action, f"region {region} exceeds the {W}x{H} display{undone}",
+              fix=f"keep 0 <= x, x+w <= {W} and 0 <= y, y+h <= {H}", instance=n, width=W, height=H)
+    return (x, y, x + w, y + h)
+
+
 def _observe(instance, mode, settle_ms, payload: dict):
     """After an action, optionally return the resulting state in the SAME call.
     mode: 'none' (json only), 'screenshot' (json + image), 'parse' (json incl. elements + image).
     Mode is validated by _validate_observe BEFORE the action runs. The action already happened
     when this runs, so a failed observation is reported inside an ok:true payload ("observed":
     false, "observe_error") — never as a failed action, which would make the agent repeat it."""
+    box = None
+    if isinstance(mode, tuple):
+        mode, box = mode
     settle_ms = int(settle_ms or 0)
     if settle_ms:
         waited = max(0, min(settle_ms, SETTLE_MAX_MS))
@@ -995,6 +1008,11 @@ def _observe(instance, mode, settle_ms, payload: dict):
         if mode == "screenshot":
             img = _grab_checked(instance, payload["action"])
             payload["observed"] = "screenshot"
+            if box:   # the display may have been resized since validation: clamp, never fail here
+                box = (min(box[0], img.width - 1), min(box[1], img.height - 1),
+                       min(box[2], img.width), min(box[3], img.height))
+                img = img.crop(box)
+                payload["observed_region"] = list(box)
             return [json.dumps(payload, ensure_ascii=False), _encode(img)]
         if mode == "parse":
             pr = _do_parse(instance)
@@ -1018,11 +1036,21 @@ def _observe(instance, mode, settle_ms, payload: dict):
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _validate_observe(action, instance, observe):
-    """Reject a bad observe mode BEFORE performing the action (never act, then error)."""
+def _validate_observe(action, instance, observe, region=""):
+    """Reject a bad observe mode/region BEFORE performing the action (never act, then error).
+    Returns what _observe takes as `mode`: the mode, or (mode, crop box) with observe_region —
+    which implies observe='screenshot'."""
     if observe not in ("none", "screenshot", "parse"):
         _fail(action, f"unknown observe mode '{observe}' — the action was not performed",
               fix="use observe='none' | 'screenshot' | 'parse'", instance=instance)
+    if not region:
+        return observe
+    if observe == "parse":
+        _fail(action, "observe_region crops a screenshot; it cannot be combined with observe='parse' — "
+                      "the action was not performed",
+              fix="drop observe_region, or use observe='screenshot'", instance=instance)
+    W, H = _geometry(instance)
+    return ("screenshot", _parse_region(action, instance, region, W, H, " — the action was not performed"))
 
 
 @mcp.tool()
@@ -1119,6 +1147,94 @@ def wait_for_text(text: str, instance: int = 1, timeout_ms: int = 10000, interva
         time.sleep(interval)
 
 
+def _pointer(n):
+    """(x, y) of the instance's pointer, or None when it cannot be read."""
+    try:
+        r = _xdo_soft(n, "pointer", "getmouselocation")
+    except ToolError:
+        return None
+    m = re.match(r"x:(-?\d+) y:(-?\d+)", r.stdout or "") if r.returncode == 0 else None
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _foreign_input(n) -> dict:
+    """{"warnings": [...]} when the pointer is not where this server left it — the person (the
+    window is theirs too) or another agent is using the instance, so earlier coordinates and the
+    keyboard focus cannot be trusted. Only pointer movement is visible; typing is not. {} otherwise."""
+    now = _pointer(n)
+    last = _PTR.get(n)
+    if now is None:
+        return {}
+    _PTR[n] = now
+    if last and (abs(now[0] - last[0]) > 3 or abs(now[1] - last[1]) > 3):
+        return {"warnings": [f"the pointer moved since this server's last action (left at {list(last)}, found at "
+                             f"{list(now)}): a person or another agent is using instance {n} — focus and "
+                             "earlier coordinates may be stale; screenshot before the next step"]}
+    return {}
+
+
+_HIT_JS = r"""(function(X, Y) {
+  var z = window.devicePixelRatio || 1;
+  var side = Math.max(0, (window.outerWidth - window.innerWidth * z) / 2);
+  var top = Math.max(0, window.outerHeight - window.innerHeight * z - side);
+  var vx = (X - window.screenX - side) / z, vy = (Y - window.screenY - top) / z;
+  if (vx < 0 || vy < 0 || vx >= window.innerWidth || vy >= window.innerHeight) return {role: "browser-ui"};
+  var e = document.elementFromPoint(vx, vy);
+  while (e && e.shadowRoot) { var i = e.shadowRoot.elementFromPoint(vx, vy); if (!i || i === e) break; e = i; }
+  if (!e) return null;
+  var t = e.closest('a[href],button,input,select,textarea,label,summary,[role],[contenteditable=""],[contenteditable="true"]') || e;
+  var c = (t.tagName === "LABEL" && t.control) ? t.control : t;
+  var tag = c.tagName.toLowerCase(), ty = (c.type || "").toLowerCase();
+  var role = c.getAttribute("role") || ({a: "link", button: "button", select: "combobox", textarea: "textbox", summary: "button"})[tag]
+    || (tag === "input" ? (({checkbox: "checkbox", radio: "radio", submit: "button", button: "button", reset: "button",
+                             range: "slider", file: "file input", image: "button"})[ty] || "textbox")
+        : (c.isContentEditable ? "textbox" : tag));
+  var lab = (c.labels && c.labels[0]) ? c.labels[0].innerText : "";
+  var name = c.getAttribute("aria-label") || lab || c.placeholder
+    || ((tag === "input" && /^(button|submit|reset)$/.test(ty)) ? c.value : "")
+    || ((tag === "input" || tag === "textarea" || tag === "select") ? "" : c.innerText) || c.alt || c.title || c.name || "";
+  var out = {role: role, name: String(name).replace(/\s+/g, " ").trim().slice(0, 80), tag: tag};
+  if (ty === "checkbox" || ty === "radio") out.checked_before = !!c.checked;
+  if (c.disabled) out.disabled = true;
+  if (tag === "a" && c.href) out.href = String(c.href).slice(0, 200);
+  if (tag === "iframe") out.note = "inside an iframe - its content is not inspected";
+  return out;
+})"""
+
+_FOCUS_JS = r"""(function() {
+  var e = document.activeElement;
+  while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
+  if (!e) return null;
+  var tag = e.tagName.toLowerCase();
+  if (tag === "iframe") return {tag: tag, unknown: true};
+  if (tag === "input" || tag === "textarea") return {tag: tag, value: String(e.value)};
+  if (e.isContentEditable) return {tag: tag, value: String(e.innerText)};
+  return {tag: tag};
+})()"""
+
+
+def _hit(n, x, y):
+    """What is under (x, y) BEFORE a click, for a Chromium-family browser on this instance:
+    {role, name, tag, checked_before?, disabled?, href?, source} from the page's DOM, or
+    {role: 'browser-ui'} outside the page area. None when there is no CDP browser (native apps)
+    or the lookup fails — a click must never fail or wait long because of it."""
+    try:
+        with _cdp(_cdp_port(n), timeout=2) as (cmd, _target, _pages):
+            r = cmd("Runtime.evaluate", {"expression": f"{_HIT_JS}({int(x)},{int(y)})", "returnByValue": True})
+        v = r.get("result", {}).get("value")
+        if isinstance(v, dict):
+            v["source"] = "browser-dom"
+            return v
+    except Exception:
+        pass
+    return None
+
+
+def _hit_kw(n, x, y) -> dict:
+    h = _hit(n, x, y)
+    return {"hit": h} if h else {}
+
+
 def _modifier_keys(modifiers: str, action, n) -> list:
     keys = [m.strip().lower() for m in re.split(r"[+\s,]+", modifiers or "") if m.strip()]
     bad = [k for k in keys if k not in MODIFIERS]
@@ -1134,6 +1250,7 @@ def _click_at(n, action, x, y, button=1, count=1, modifiers=""):
     mods = _modifier_keys(modifiers, action, n)
     _check_xy(action, n, (x, y))
     _xdo(n, action, "mousemove", x, y, opts=("--sync",))
+    _PTR[n] = (int(x), int(y))
     for m in mods:
         _xdo(n, action, "keydown", m)
     try:
@@ -1149,34 +1266,44 @@ def _click_at(n, action, x, y, button=1, count=1, modifiers=""):
 
 @mcp.tool()
 def click(x: int, y: int, instance: int = 1, button: int = 1, count: int = 1, modifiers: str = "",
-          observe: str = "none", settle_ms: int = 0):
+          observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Click at absolute pixel coords (top-left origin) in an instance.
 
-    Returns {"ok", "action", "instance", "detail"}. button: 1=left, 2=middle, 3=right.
+    For anything with a label, find_elements('Save') -> click_element(id) beats guessing pixels.
+    Returns {"ok", "action", "instance", "detail", "hit"?, "warnings"?}. "hit" (Chromium-family
+    browsers only, read from the page's DOM just before the click) names what was under the
+    point: {"role": "checkbox", "name": "Remember me", "tag", "checked_before", "disabled",
+    "href", …} or {"role": "browser-ui"} for the toolbar/tab strip — compare it with what you
+    meant to click; it is absent for native apps. "warnings" appears when the pointer was not
+    where this server left it (a person or another agent is using the instance — re-screenshot).
+    button: 1=left, 2=middle, 3=right.
     count: 1–3 clicks (2 = double-click, 3 = triple-click selects a line/paragraph).
     modifiers: keys held during the click — 'ctrl' (open in new tab / multi-select), 'shift'
     (range select), 'alt', 'super', combinable 'ctrl+shift'; released afterwards whatever happens.
     `observe`='screenshot'|'parse' additionally returns the resulting screen state in the SAME
     call (saves a round-trip); `settle_ms` (max 5000, "settle_clamped": true if you asked for
     more) waits for the UI to update first — use 400–1500 after anything that navigates or
-    submits, or wait_for_stable() when you don't know how long. Fails (isError) if the instance
+    submits, or wait_for_stable() when you don't know how long. `observe_region`='x,y,w,h' crops
+    that screenshot to the part you care about (implies observe='screenshot'; far fewer tokens
+    than the full display; validated before the action). Fails (isError) if the instance
     is down, the coordinates are outside the display or a modifier name is unknown (nothing is
     clicked then). A failed observation after a successful click is reported as "observed":
     false inside an ok result — the click is not repeated."""
     n = _require("click", instance)
-    _validate_observe("click", n, observe)
+    observe = _validate_observe("click", n, observe, observe_region)
     count = max(1, min(int(count), 3))
     with _ilock(n):
+        extra = {**_foreign_input(n), **_hit_kw(n, x, y)}
         _click_at(n, "click", x, y, button, count, modifiers)
         return _observe(n, observe, settle_ms,
-                        {"action": "click", "detail": f"clicked ({x},{y}) button {button}" + (f" x{count}" if count > 1 else "")
+                        {"action": "click", **extra, "detail": f"clicked ({x},{y}) button {button}" + (f" x{count}" if count > 1 else "")
                                                        + (f" with {modifiers}" if modifiers else ""),
                          "count": count, "modifiers": modifiers})
 
 
 @mcp.tool()
 def drag(x1: int, y1: int, x2: int, y2: int, instance: int = 1, button: int = 1, steps: int = 10,
-         observe: str = "none", settle_ms: int = 0):
+         observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Drag (mouse-down → move → up) from (x1,y1) to (x2,y2) — for drawing, selecting, sliders.
 
     Returns {"ok", "action", "instance", "detail", "steps"}. `steps` (default 10, 1–100) is the
@@ -1186,10 +1313,11 @@ def drag(x1: int, y1: int, x2: int, y2: int, instance: int = 1, button: int = 1,
     `observe`/`settle_ms`: see click(). Fails (isError) if the instance is down or either point
     is off-screen."""
     n = _require("drag", instance)
-    _validate_observe("drag", n, observe)
+    observe = _validate_observe("drag", n, observe, observe_region)
     _check_xy("drag", n, (x1, y1), (x2, y2))
     steps = max(1, min(int(steps), 100))
     with _ilock(n):
+        extra = _foreign_input(n)
         _xdo(n, "drag", "mousemove", x1, y1, opts=("--sync",))
         _xdo(n, "drag", "mousedown", button)
         try:
@@ -1204,37 +1332,41 @@ def drag(x1: int, y1: int, x2: int, y2: int, instance: int = 1, button: int = 1,
                 _xdo(n, "drag", "mouseup", button)
             except ToolError:
                 pass
+            _PTR.pop(n, None)   # re-read on the next action: a failed step leaves it mid-way
         return _observe(n, observe, settle_ms,
-                        {"action": "drag", "detail": f"dragged ({x1},{y1})->({x2},{y2})", "steps": steps})
+                        {"action": "drag", **extra, "detail": f"dragged ({x1},{y1})->({x2},{y2})", "steps": steps})
 
 
 @mcp.tool()
-def double_click(x: int, y: int, instance: int = 1, observe: str = "none", settle_ms: int = 0):
+def double_click(x: int, y: int, instance: int = 1, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Double-click at absolute pixel coords in an instance (e.g. open a file icon, select a word).
     Same as click(count=2).
 
-    Returns {"ok", "action", "instance", "detail"}. `observe`/`settle_ms`: see click().
-    Fails (isError) if the instance is down or the coordinates are off-screen."""
+    Returns {"ok", "action", "instance", "detail", "hit"?, "warnings"?} — see click().
+    `observe`/`settle_ms`/`observe_region`: see click(). Fails (isError) if the instance is down
+    or the coordinates are off-screen."""
     n = _require("double_click", instance)
-    _validate_observe("double_click", n, observe)
+    observe = _validate_observe("double_click", n, observe, observe_region)
     with _ilock(n):
+        extra = {**_foreign_input(n), **_hit_kw(n, x, y)}
         _click_at(n, "double_click", x, y, 1, 2)
         return _observe(n, observe, settle_ms,
-                        {"action": "double_click", "detail": f"double-clicked ({x},{y})"})
+                        {"action": "double_click", **extra, "detail": f"double-clicked ({x},{y})"})
 
 
 @mcp.tool()
 def click_element(id: int, instance: int = 1, button: int = 1, modifiers: str = "", observe: str = "none",
-                  settle_ms: int = 0):
+                  settle_ms: int = 0, observe_region: str = ""):
     """Click an element by id from that instance's most recent parse_screen/find_elements (no
     coordinate guessing).
 
-    Returns {"ok", "action", "instance", "detail", "element", "center"}. Fails (isError) with the
+    Returns {"ok", "action", "instance", "detail", "element", "center", "hit"?, "warnings"?}
+    ("hit"/"warnings": see click()). Fails (isError) with the
     fix named if the id is unknown — run parse_screen(instance) first. Ids go stale when the
     screen changes: after navigation, re-parse before clicking. `modifiers`/`observe`/`settle_ms`:
     see click()."""
     n = _require("click_element", instance)
-    _validate_observe("click_element", n, observe)
+    observe = _validate_observe("click_element", n, observe, observe_region)
     last = _LAST.get(n, {})
     if id not in last:
         _fail("click_element", f"unknown element id {id} for instance {n}",
@@ -1242,9 +1374,10 @@ def click_element(id: int, instance: int = 1, button: int = 1, modifiers: str = 
               instance=n, known_ids=len(last))
     x, y = last[id]
     with _ilock(n):
+        extra = {**_foreign_input(n), **_hit_kw(n, x, y)}
         _click_at(n, "click_element", x, y, button, 1, modifiers)
         return _observe(n, observe, settle_ms,
-                        {"action": "click_element", "detail": f"clicked element {id} at ({x},{y})",
+                        {"action": "click_element", **extra, "detail": f"clicked element {id} at ({x},{y})",
                          "element": id, "center": [x, y]})
 
 
@@ -1275,12 +1408,45 @@ def _xclip_read(n, action):
     return None, err
 
 
+def _type_into(n, action, text, clear=False) -> str:
+    """Type `text` into the focused field (see type_text for why non-ASCII goes via the
+    clipboard). Returns the method used. Caller holds the instance lock."""
+    if clear:
+        _xdo(n, action, "key", "ctrl+a", opts=("--clearmodifiers",))
+    if any(ord(c) > 127 for c in text):
+        if not shutil.which("xclip"):
+            _fail(action, "text contains non-ASCII characters but xclip is not installed — "
+                               "typing it via xdotool would silently drop characters in some toolkits",
+                  fix="install xclip (e.g. `sudo apt install xclip`) or send ASCII-only text",
+                  instance=n)
+        prev, _err = _xclip_read(n, action)        # restored below: with the host clipboard
+        r = _xclip(n, action, "-i", input=text.encode("utf-8"))   # bridge, agent text must not linger
+        if r.returncode != 0:
+            if not _up(n):
+                _fail_down(action, n)
+            _fail(action, "xclip failed to set the clipboard", instance=n)
+        time.sleep(0.05)
+        _xdo(n, action, "key", "ctrl+v", opts=("--clearmodifiers",))
+        time.sleep(0.3)   # let the app finish reading the selection before it changes again
+        try:
+            _xclip(n, action, "-i", input=(prev or "").encode("utf-8"))
+        except ToolError:
+            pass          # best-effort: the text was typed; a failed restore must not fail the call
+        method = "clipboard"
+    else:
+        _xdo(n, action, "type", text, opts=("--clearmodifiers", "--delay", "15"),
+             timeout=XDO_TIMEOUT + 0.03 * len(text))
+        method = "xdotool"
+    return method
+
+
 @mcp.tool()
 def type_text(text: str, instance: int = 1, clear: bool = False, submit: bool = False,
-              observe: str = "none", settle_ms: int = 0):
+              observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Type into the focused field — unicode-safe. Click the field first to focus it.
 
-    Returns {"ok", "action", "instance", "detail", "method": "xdotool"|"clipboard"}.
+    To set a form field in one verified call use fill() instead (click + replace + read back).
+    Returns {"ok", "action", "instance", "detail", "method": "xdotool"|"clipboard", "warnings"?}.
     clear=true selects the field's content first (ctrl+a) so the text REPLACES it;
     submit=true presses Return afterwards — one call for "fill and submit".
     Pure ASCII is typed via xdotool (timeout scales with length); text with any non-ASCII char
@@ -1293,39 +1459,120 @@ def type_text(text: str, instance: int = 1, clear: bool = False, submit: bool = 
     clipboard(action='set'). Fails (isError) rather than silently losing characters if xclip is
     missing for non-ASCII text. `observe`/`settle_ms`: see click()."""
     n = _require("type_text", instance)
-    _validate_observe("type_text", n, observe)
+    observe = _validate_observe("type_text", n, observe, observe_region)
     with _ilock(n):
-        if clear:
-            _xdo(n, "type_text", "key", "ctrl+a", opts=("--clearmodifiers",))
-        if any(ord(c) > 127 for c in text):
-            if not shutil.which("xclip"):
-                _fail("type_text", "text contains non-ASCII characters but xclip is not installed — "
-                                   "typing it via xdotool would silently drop characters in some toolkits",
-                      fix="install xclip (e.g. `sudo apt install xclip`) or send ASCII-only text",
-                      instance=n)
-            prev, _err = _xclip_read(n, "type_text")        # restored below: with the host clipboard
-            r = _xclip(n, "type_text", "-i", input=text.encode("utf-8"))   # bridge, agent text must not linger
-            if r.returncode != 0:
-                if not _up(n):
-                    _fail_down("type_text", n)
-                _fail("type_text", "xclip failed to set the clipboard", instance=n)
-            time.sleep(0.05)
-            _xdo(n, "type_text", "key", "ctrl+v", opts=("--clearmodifiers",))
-            time.sleep(0.3)   # let the app finish reading the selection before it changes again
-            try:
-                _xclip(n, "type_text", "-i", input=(prev or "").encode("utf-8"))
-            except ToolError:
-                pass          # best-effort: the text was typed; a failed restore must not fail the call
-            method = "clipboard"
-        else:
-            _xdo(n, "type_text", "type", text, opts=("--clearmodifiers", "--delay", "15"),
-                 timeout=XDO_TIMEOUT + 0.03 * len(text))
-            method = "xdotool"
+        extra = _foreign_input(n)
+        method = _type_into(n, "type_text", text, clear)
         if submit:
             _xdo(n, "type_text", "key", "Return", opts=("--clearmodifiers",))
         return _observe(n, observe, settle_ms,
-                        {"action": "type_text", "detail": f"typed {len(text)} chars" + (" + Return" if submit else ""),
+                        {"action": "type_text", **extra, "detail": f"typed {len(text)} chars" + (" + Return" if submit else ""),
                          "method": method, "cleared": bool(clear), "submitted": bool(submit)})
+
+
+def _read_field(n, action):
+    """Read back the focused field after a fill → (value | None, how, focus_tag | None).
+    Browser: the focused element's value over CDP (exact, clipboard untouched); a focus that is
+    not a text field comes back as (None, 'browser-dom', tag). Anything else: select-all + copy
+    through the clipboard behind a sentinel, so 'nothing copyable' cannot be mistaken for the
+    text we just pasted; (None, 'unreadable', None) then. The clipboard is restored."""
+    try:
+        with _cdp(_cdp_port(n), timeout=3) as (cmd, _target, _pages):
+            r = cmd("Runtime.evaluate", {"expression": _FOCUS_JS, "returnByValue": True})
+        v = r.get("result", {}).get("value")
+        if isinstance(v, dict) and not v.get("unknown"):
+            return (v["value"] if isinstance(v.get("value"), str) else None), "browser-dom", v.get("tag")
+    except Exception:
+        pass
+    if not shutil.which("xclip"):
+        return None, "unreadable", None
+    sentinel = f"glovebox-fill-{os.getpid()}-{time.time_ns()}"
+    try:
+        prev, _err = _xclip_read(n, action)
+        _xclip(n, action, "-i", input=sentinel.encode())
+        time.sleep(0.05)
+        _xdo(n, action, "key", "ctrl+a", "ctrl+c", opts=("--clearmodifiers", "--delay", "40"))
+        time.sleep(0.2)
+        got, _err = _xclip_read(n, action)
+        _xclip(n, action, "-i", input=(prev or "").encode("utf-8"))
+    except ToolError:
+        return None, "unreadable", None
+    if got is None or got == sentinel:
+        return None, "unreadable", None
+    _xdo_soft(n, action, "key", "--clearmodifiers", "End")   # collapse the selection we made
+    return got, "clipboard", None
+
+
+@mcp.tool()
+def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = -1, submit: bool = False,
+         verify: bool = True, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
+    """Set a form field in ONE verified call: click it, replace its content with `text`, read
+    the value back. Use it instead of click + type_text + screenshot for every field of a form.
+
+    Target the field with x,y (absolute pixels) or `element` (an id from parse_screen/
+    find_elements). The old content is replaced (select-all, then type; text="" empties the
+    field). submit=true presses Return afterwards — only when the read-back did not fail.
+    Returns {"ok", "action", "instance", "detail", "method", "verified": true|false|null,
+    "read_back": "browser-dom"|"clipboard"|"unreadable", "value"? , "hit"?, "warnings"?}:
+      verified true  — the field now holds exactly `text` (trailing newline ignored);
+      verified false — it holds something else ("value", first 200 chars): the field reformats
+                       or limits input (dates, phone masks, maxlength) — "warning" says so;
+      verified null  — the value could not be read (password field in a native app, canvas,
+                       iframe): screenshot to check. verify=false skips the read-back.
+    Fails (isError), having clicked and typed, when a browser's focus is not on a text field
+    after the click (the click missed — "hit" says what it landed on) or when the field is
+    still empty: nothing is submitted then, and repeating fill() is safe (it replaces).
+    Read-back: browsers answer through the page's DOM; other apps through select-all + copy
+    (the clipboard is restored). `observe`/`settle_ms`/`observe_region`: see click()."""
+    n = _require("fill", instance)
+    observe = _validate_observe("fill", n, observe, observe_region)
+    if int(element) >= 0:
+        last = _LAST.get(n, {})
+        if element not in last:
+            _fail("fill", f"unknown element id {element} for instance {n} — nothing was done",
+                  fix="run parse_screen/find_elements first — ids are only valid for the most recent parse",
+                  instance=n, known_ids=len(last))
+        x, y = last[element]
+    elif x < 0 or y < 0:
+        _fail("fill", "no target — nothing was done", fix="pass x and y (pixels) or element=<id from find_elements>",
+              instance=n)
+    with _ilock(n):
+        extra = {**_foreign_input(n), **_hit_kw(n, x, y)}
+        _click_at(n, "fill", x, y)
+        time.sleep(0.15)            # focus handlers run before we type
+        if text == "":
+            _xdo(n, "fill", "key", "ctrl+a", "BackSpace", opts=("--clearmodifiers", "--delay", "40"))
+            method = "xdotool"
+        else:
+            method = _type_into(n, "fill", text, clear=True)
+        res = {"method": method, "verified": None, "read_back": "skipped", "center": [int(x), int(y)]}
+        if verify:
+            time.sleep(0.15)
+            got, how, tag = _read_field(n, "fill")
+            res["read_back"] = how
+            norm = lambda v: v.replace("\r\n", "\n").rstrip("\n")
+            if got is None and how == "browser-dom":
+                _fail("fill", f"after the click the browser's focus is on <{tag}>, not a text field — the click at "
+                              f"({x},{y}) missed and the text went nowhere (nothing was submitted)",
+                      fix="screenshot / find_elements to locate the field, then fill() again; inside an iframe "
+                          "or a custom widget use click + type_text", instance=n, **extra)
+            if got is None:
+                res["note"] = "the value could not be read back — screenshot to confirm"
+            elif norm(got) == norm(text):
+                res["verified"] = True
+            elif got == "" and text != "":
+                _fail("fill", f"the field at ({x},{y}) is still empty after typing {len(text)} chars (nothing was submitted)",
+                      fix="the field may be read-only or not focused — screenshot, then click it and retry",
+                      instance=n, read_back=how, **extra)
+            else:
+                res.update(verified=False, value=got[:200],
+                           warning="the field holds a different value than the text sent — it reformats or "
+                                   "limits input, or the paste partly missed; check \"value\"")
+        if submit:
+            _xdo(n, "fill", "key", "Return", opts=("--clearmodifiers",))
+        return _observe(n, observe, settle_ms,
+                        {"action": "fill", **extra, **res, "submitted": bool(submit),
+                         "detail": f"filled {len(text)} chars at ({x},{y})" + (" + Return" if submit else "")})
 
 
 @mcp.tool()
@@ -1366,7 +1613,7 @@ def clipboard(action: str = "get", text: str = "", instance: int = 1) -> str:
 
 @mcp.tool()
 def upload_file(filepath: str, instance: int = 1, selector: str = "input[type=file]",
-                page_url_contains: str = "", observe: str = "none", settle_ms: int = 0):
+                page_url_contains: str = "", observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Attach a local file to a page's <input type=file> via Chrome DevTools Protocol — use this for
     ALL browser uploads (logos, images, docs).
 
@@ -1383,7 +1630,7 @@ def upload_file(filepath: str, instance: int = 1, selector: str = "input[type=fi
     NATIVE (non-browser) apps: use open_file() or drive the app's own Open dialog — it IS visible
     here. `observe`/`settle_ms`: see click()."""
     n = _require("upload_file", instance)
-    _validate_observe("upload_file", n, observe)
+    observe = _validate_observe("upload_file", n, observe, observe_region)
     p = _resolve_path("upload_file", n, filepath)
     try:
         page = _cdp_set_file_input(_cdp_port(n), p, selector, page_url_contains)
@@ -1635,7 +1882,7 @@ def _validate_keys(action, n, toks):
 
 
 @mcp.tool()
-def press_keys(keys: str, instance: int = 1, observe: str = "none", settle_ms: int = 0):
+def press_keys(keys: str, instance: int = 1, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Press a key, a combo, or a SEQUENCE (xdotool keysym syntax, space-separated for sequences):
     'Return', 'ctrl+a', 'Tab', 'ctrl+t', 'F5', 'ctrl+a Delete', 'alt+F4', 'shift+Insert'.
 
@@ -1645,12 +1892,13 @@ def press_keys(keys: str, instance: int = 1, observe: str = "none", settle_ms: i
     display. Browser navigation: 'ctrl+l' → type_text(url) → 'Return' (or browser(action=
     'navigate')). `observe`/`settle_ms`: see click()."""
     n = _require("press_keys", instance)
-    _validate_observe("press_keys", n, observe)
+    observe = _validate_observe("press_keys", n, observe, observe_region)
     toks = keys.split()
     if not toks:
         _fail("press_keys", "no keys given", fix="pass e.g. 'Return' or 'ctrl+a Delete'", instance=n)
     _validate_keys("press_keys", n, toks)
     with _ilock(n):
+        extra = _foreign_input(n)
         r = _xdo(n, "press_keys", "key", *toks, opts=("--clearmodifiers", "--delay", "40"))
         err = r.stderr or ""
         # second line of defence (libX11 missing): xdotool exits 0 on unknown keysyms
@@ -1660,7 +1908,7 @@ def press_keys(keys: str, instance: int = 1, observe: str = "none", settle_ms: i
                   fix="use xdotool keysym syntax: 'Return', 'ctrl+a', 'Tab', 'ctrl+t', 'F5'; sequences are space-separated",
                   instance=n)
         return _observe(n, observe, settle_ms,
-                        {"action": "press_keys", "detail": f"pressed {keys}", "keys": toks})
+                        {"action": "press_keys", **extra, "detail": f"pressed {keys}", "keys": toks})
 
 
 @mcp.tool()
@@ -1674,23 +1922,32 @@ def move_mouse(x: int, y: int, instance: int = 1) -> str:
     _check_xy("move_mouse", n, (x, y))
     with _ilock(n):
         _xdo(n, "move_mouse", "mousemove", x, y, opts=("--sync",))
+        _PTR[n] = (int(x), int(y))
     return _ok("move_mouse", n, detail=f"moved to ({x},{y})")
 
 
 @mcp.tool()
-def scroll(amount: int, instance: int = 1, x: int = -1, y: int = -1, axis: str = "vertical",
-           observe: str = "none", settle_ms: int = 0):
-    """Scroll the wheel: positive = up (or left), negative = down (or right).
+def scroll(amount: int = 3, instance: int = 1, x: int = -1, y: int = -1, axis: str = "vertical",
+           direction: str = "", observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
+    """Scroll the wheel. Say where: direction='down'|'up'|'left'|'right' with `amount` notches
+    (sign ignored) — or the signed form: positive = up (or left), negative = down (or right).
 
-    Returns {"ok", "action", "instance", "detail", "applied", "clamped"}. One unit ≈ one wheel
+    Returns {"ok", "action", "instance", "detail", "applied", "clamped", "axis", "direction"}. One unit ≈ one wheel
     notch (a few lines); at most 100 notches per call ("clamped": true when you asked for more,
     "applied" says how many were sent). Scrolling targets the window under the pointer — pass
     x,y to move there first (both >= 0), otherwise the current pointer position is used.
     axis='horizontal' scrolls sideways (wheel buttons 6/7). Fails (isError) on amount=0 (a
     no-op), a dead instance, off-screen x,y or an unknown axis. `observe`/`settle_ms`: see click()."""
     n = _require("scroll", instance)
-    _validate_observe("scroll", n, observe)
+    observe = _validate_observe("scroll", n, observe, observe_region)
     amount = int(amount)
+    if direction:
+        d = direction.strip().lower()
+        if d not in ("up", "down", "left", "right"):
+            _fail("scroll", f"unknown direction '{direction}' — nothing was scrolled",
+                  fix="use direction='up' | 'down' | 'left' | 'right'", instance=n)
+        axis = "vertical" if d in ("up", "down") else "horizontal"
+        amount = abs(amount) if d in ("up", "left") else -abs(amount)
     if amount == 0:
         _fail("scroll", "scroll amount 0 is a no-op — nothing was scrolled",
               fix="pass a positive amount to scroll up or a negative amount to scroll down", instance=n)
@@ -1704,12 +1961,15 @@ def scroll(amount: int, instance: int = 1, x: int = -1, y: int = -1, axis: str =
     else:
         btn = 6 if amount > 0 else 7
     with _ilock(n):
+        extra = _foreign_input(n)
         if x >= 0 or y >= 0:
             _xdo(n, "scroll", "mousemove", x, y, opts=("--sync",))
+            _PTR[n] = (int(x), int(y))
         _xdo(n, "scroll", "click", btn, opts=("--repeat", str(applied), "--delay", "20"))
         return _observe(n, observe, settle_ms,
-                        {"action": "scroll", "detail": f"scrolled {amount:+d} {axis}" + (f" (applied {applied})" if applied != abs(amount) else ""),
-                         "applied": applied, "clamped": applied != abs(amount), "axis": axis})
+                        {"action": "scroll", **extra, "detail": f"scrolled {amount:+d} {axis}" + (f" (applied {applied})" if applied != abs(amount) else ""),
+                         "applied": applied, "clamped": applied != abs(amount), "axis": axis,
+                         "direction": {4: "up", 5: "down", 6: "left", 7: "right"}[btn]})
 
 
 @mcp.tool()
@@ -1728,7 +1988,7 @@ def wait_ms(ms: int) -> str:
 
 @mcp.tool()
 def wait_for_stable(instance: int = 1, timeout_ms: int = 5000, interval_ms: int = 300,
-                    threshold: float = 0.002, observe: str = "none"):
+                    threshold: float = 0.002, observe: str = "none", observe_region: str = ""):
     """Wait until the screen stops changing (page loaded, app drew, animation ended) — replaces
     guessing a settle_ms.
 
@@ -1740,7 +2000,7 @@ def wait_for_stable(instance: int = 1, timeout_ms: int = 5000, interval_ms: int 
     is reported, not hidden. `observe`='screenshot'|'parse' returns the final state in the same
     call. Fails (isError) if the instance is down."""
     n = _require("wait_for_stable", instance)
-    _validate_observe("wait_for_stable", n, observe)
+    observe = _validate_observe("wait_for_stable", n, observe, observe_region)
     timeout_ms = max(0, min(int(timeout_ms), 30000))
     interval = max(100, min(int(interval_ms), 2000)) / 1000.0
     t0 = time.time()
@@ -1812,7 +2072,7 @@ def window_info(instance: int = 1) -> str:
 
 @mcp.tool()
 def manage_window(action: str, instance: int = 1, window_id: int = 0, width: int = 0, height: int = 0,
-                  x: int = 0, y: int = 0, observe: str = "none", settle_ms: int = 0):
+                  x: int = 0, y: int = 0, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Act on a window of an instance: action='activate' (focus/raise — switch between an app's
     windows or dialogs), 'close' (asks the app to close it — a save prompt may appear),
     'minimize', 'maximize', 'restore' (un-maximize), 'move' (to x,y), 'resize' (to width x
@@ -1822,7 +2082,7 @@ def manage_window(action: str, instance: int = 1, window_id: int = 0, width: int
     click(). Fails (isError) if the window id is unknown, the action is unknown, move/resize
     sizes are missing, or the instance is down. maximize/restore need wmctrl (status().deps)."""
     n = _require("manage_window", instance)
-    _validate_observe("manage_window", n, observe)
+    observe = _validate_observe("manage_window", n, observe, observe_region)
     actions = ("activate", "close", "minimize", "maximize", "restore", "move", "resize")
     if action not in actions:
         _fail("manage_window", f"unknown action '{action}'", fix=f"use one of {', '.join(actions)}", instance=n)
@@ -1897,7 +2157,8 @@ def status() -> str:
     tesseract: {binary, pytesseract, langs, lang, ready, reason}},
     "instances": [...same as list_instances], "keyboard": {host_layout, override}, "clipboard_sync":
     {enabled, poll_s, note}, "deps": {xdotool, xclip, xephyr, openbox, wmctrl, xdpyinfo, xkbcomp,
-    setxkbmap, dbus_run_session, tesseract, nvidia_smi: true|false}, "notes": [...]}.
+    setxkbmap, dbus_run_session, tesseract, nvidia_smi: true|false}, "notes": [...], "tips": [...]}
+    ("tips": the tools that save the most round-trips on this setup — read them once).
     "vision.effective" is the grounding backend actually in use (none|basic|local), re-resolved
     every 20 s (installing OmniParser takes effect without a restart); when GLOVEBOX_VISION=auto it
     is the best READY one and "reason" says why (e.g. OmniParser weights missing, GPU too small).
@@ -1921,6 +2182,9 @@ def status() -> str:
         notes.append("clipboard sync is on: text copied on the host is readable inside every instance "
                      "(clipboard(get), pages in the sandbox browser) — GLOVEBOX_CLIPBOARD_SYNC=0 turns it off")
     tess = vision.tesseract_info()
+    tips = ["form fields: fill(text, x, y) clicks, replaces and reads the value back in one call",
+            "after an action pass observe_region='x,y,w,h' to see only the part that changed (cheaper than a full screenshot)",
+            "browsers: click() returns \"hit\" (the element under the point); browser(action='text') gives exact page text"]
     deps = {k: bool(shutil.which(b)) for k, b in (
         ("xdotool", "xdotool"), ("xclip", "xclip"), ("xephyr", "Xephyr"), ("openbox", "openbox"),
         ("wmctrl", "wmctrl"), ("xdpyinfo", "xdpyinfo"), ("xkbcomp", "xkbcomp"), ("setxkbmap", "setxkbmap"),
@@ -1929,13 +2193,17 @@ def status() -> str:
                 "override": os.environ.get("GLOVEBOX_KEYBOARD", "")}
     v = vision.resolve(omni=omni, tess=tess, service_loaded=bool(svc and svc.get("loaded")))
     _VISION.update(value=v, at=time.time())
+    tips.insert(0, "labelled UI: find_elements('Save') -> click_element(id) instead of guessing pixels; "
+                   "wait_for_text('Done') instead of sleeping" if v["effective"] != "none" else
+                   "no grounding backend: screenshot(region=…) and click(x, y); ./install.sh basic adds "
+                   "find_elements/click_element/wait_for_text by label")
     return _ok("status", version=__version__, host_display=HOST, tmp_dir=TMP,
                cleanup_on_exit=_truthy(os.environ.get("GLOVEBOX_CLEANUP_ON_EXIT", "")),
                vision={**v, "gpu": gpu, "omniparser": omni, "tesseract": tess},
                instances=_instance_rows(), keyboard=keyboard,
                clipboard_sync={"enabled": CLIP_SYNC, "poll_s": host_bridge.POLL_S,
                                "note": "host clipboard text is mirrored into every instance" if CLIP_SYNC else "off"},
-               deps=deps, notes=notes)
+               deps=deps, notes=notes, tips=tips)
 
 
 if __name__ == "__main__":

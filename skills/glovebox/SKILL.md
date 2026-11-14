@@ -66,6 +66,7 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 
 | Goal | Call |
 |---|---|
+| Set a form field, verified | `fill("…", x, y, instance)` or `fill("…", element=id)` — clicks, replaces, reads the value back (`verified`); use it for every field of a form |
 | Type into the focused field | click it, then `type_text("…", instance, clear=True, submit=True)` — unicode (č/š/ž) is handled |
 | Keys, shortcuts, sequences | `press_keys("ctrl+l", instance)` · `press_keys("ctrl+a Delete")` — validated before pressing |
 | Exact text out of the app | select (drag / `ctrl+a`) → `press_keys("ctrl+c")` → `clipboard(action="get")` — no OCR |
@@ -73,7 +74,7 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 | Upload a file to a web form | `upload_file("/path/or/relative", instance)` — **never** click an upload button expecting a dialog (invisible, hangs the renderer) |
 | Hand the sandbox a file you made | `put_file("data.csv", "…", instance)` (binary: `encoding="base64"`), then `open_file`/`upload_file` it by name |
 | Open a file in a native app | `open_file("doc.odt", instance, app="libreoffice")` — relative paths are in `files/<N>/` (`list_files`) |
-| Scroll | `scroll(-5, instance, x=…, y=…)` (negative = down; `axis="horizontal"`) |
+| Scroll | `scroll(5, instance, direction="down", x=…, y=…)` (or signed: negative = down) |
 | Drag, draw, sliders | `drag(x1, y1, x2, y2, instance, steps=10)` |
 | Hover (menus, tooltips) | `move_mouse(x, y, instance)` → `screenshot` |
 | Ctrl-click / double / triple click | `click(x, y, instance, modifiers="ctrl")` · `count=2` · `count=3` |
@@ -84,6 +85,13 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 
 ## Rules that bite
 
+- **Labels beat pixels.** With `local`/`basic` vision use `find_elements` → `click_element`
+  and `wait_for_text`; if your client defers tool schemas, load those and `fill` first.
+- **Read `hit`.** Browser clicks return the element under the point (`role`, `name`,
+  `checked_before`) — if it is not what you meant, you misclicked; fix it before going on.
+- **Look at less.** `observe_region="x,y,w,h"` returns only that rectangle after an action.
+- **`warnings` about the pointer** = someone else is using your instance; screenshot before
+  the next step.
 - **A failed observation never un-does the action.** `click(observe="parse")`
   whose parse fails returns `ok: true, observed: false, observe_error` — the
   click happened. Do not click again; screenshot.

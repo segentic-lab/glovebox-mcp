@@ -102,7 +102,7 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 > **Driving it with an AI agent?** Paste [`AGENTS.md`](AGENTS.md) into the agent's system prompt — it
 > teaches the observe → act → verify loop, grounding, the upload/unicode gotchas, and when to stop.
 
-## Tools (29)
+## Tools (30)
 
 | Tool | What |
 |---|---|
@@ -111,8 +111,9 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | `parse_screen(instance, granularity?)` | Vision grounding → JSON of detected elements (id, type, label, interactive, pixel-center; capped at 300 per call, flagged via `"truncated"`) + a numbered Set-of-Mark image. `basic` merges OCR words into **lines** (`"Sign in"` = one target; `granularity="word"` for single words). |
 | `find_elements(query, type?)` | Parse + filter in one call: the elements whose label contains `query` (and optionally of one `type`), ids ready for `click_element`. `count: 0` is an honest "not on screen". |
 | `wait_for_text(text, timeout_ms?, appear?)` | Poll OCR/parse until a text appears (or disappears) — the honest replacement for "sleep and hope" after navigation; `timed_out` is reported, never hidden. |
+| `fill(text, x, y \| element=id, submit?, verify?)` | Set a form field in **one verified call**: click it, replace its content, **read the value back**. `verified: true` = the field holds exactly the text; `false` + `value` = the field reformatted or cut it (masks, `maxlength`); `null` = unreadable (native password field). A click that missed the field (browser focus not on a text field) or a field left empty **fails**, and nothing is submitted. |
 | `click_element(id, modifiers?)` | Click an element from the last `parse_screen`/`find_elements` (no coordinate guessing). |
-| `click(x,y, count?, modifiers?)` · `double_click` · `move_mouse` · `scroll(amount, x?, y?, axis?)` · `drag(…, steps?)` | Pointer ops. Coordinates outside the display are **rejected** (xdotool would silently clamp them). `count=2/3` double/triple-clicks, `modifiers="ctrl+shift"` holds keys (released whatever happens). `scroll` can move to `x,y` first, scroll `horizontal`, and reports `applied`/`clamped` (max 100 notches). `drag` emits intermediate motion events so canvases and sliders register it, and releases the button even if a step fails. |
+| `click(x,y, count?, modifiers?)` · `double_click` · `move_mouse` · `scroll(amount, direction?, x?, y?, axis?)` · `drag(…, steps?)` | Pointer ops. In Chromium-family browsers a click returns **`hit`** — the element under the point, read from the DOM just before the click (`{"role": "checkbox", "name": "Remember me", "checked_before": false}`), so a misclick is visible at once. `scroll(3, direction="down")` or the signed form (negative = down). Coordinates outside the display are **rejected** (xdotool would silently clamp them). `count=2/3` double/triple-clicks, `modifiers="ctrl+shift"` holds keys (released whatever happens). `scroll` can move to `x,y` first, scroll `horizontal`, and reports `applied`/`clamped` (max 100 notches). `drag` emits intermediate motion events so canvases and sliders register it, and releases the button even if a step fails. |
 | `type_text(text, clear?, submit?)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps; the clipboard is put back afterwards). `clear=true` replaces the field's content, `submit=true` presses Return — one call to fill and submit. |
 | `press_keys("ctrl+a" / "Return" / "ctrl+a Delete")` | Keys, combos, and space-separated **sequences** (xdotool syntax). Every token is validated against the X keysym table **before** anything is pressed — an invalid name anywhere in a sequence errors with nothing pressed. |
 | `browser(action="info"\|"navigate"\|"text"\|"eval")` | The instance's Chromium over CDP: current URL/title and tabs, exact navigation (waits for load), the rendered page text without OCR, or a JavaScript expression's value. |
@@ -129,7 +130,10 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n \| all_launched=true)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). `list_instances` shows each window's `title`; instances closed by hand disappear and their number is reused. |
 | `wait_ms(ms)` · `get_screen_size()` | Timing / sandbox size + effective vision backend. |
 
-Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** (see below).
+Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** /
+**`observe_region="x,y,w,h"`** (see below; the region crops the returned screenshot to the part you
+care about — a fraction of the tokens of a full frame). Action tools add **`warnings`** when the
+pointer is not where the server left it: a person or another agent is using the same instance.
 In `local` mode OmniParser is **lazy-loaded** on first `parse_screen` (~6 s once, then ~2 s/parse),
 after a GPU preflight (VRAM present and free).
 
@@ -305,7 +309,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 
 ## Files
 
-- `server.py` — the MCP server (all 29 tools).
+- `server.py` — the MCP server (all 30 tools).
 - `vision.py` — vision backends: selection rules, GPU preflight, tesseract grouping, OmniParser lifecycle (`check` / `install-omniparser` CLI).
 - `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
 - `_paths.py` — shared helpers: the 0700 per-user temp dir, display naming, the liveness probe.
