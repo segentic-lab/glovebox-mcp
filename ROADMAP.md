@@ -11,7 +11,7 @@ timeouts, proxy leaking into CDP, raw `No module named 'util'` in the default vi
 vision backends moved into `vision.py` with a GPU preflight and an `auto` mode that reports its
 reasoning, and four new tools (`clipboard`, `wait_for_stable`, `window_info`, `app_log`).
 
-## 0.4.0 — MCP Python SDK 2.x (done 2026-11-01, unreleased)
+## 0.4.0 — MCP Python SDK 2.x (done 2026-11-01, released 2026-11-14)
 
 Migrated: `MCPServer("glovebox", version=…)`, 2.x import paths, snake_case wire names in the
 test client, dependency floor `mcp[cli]>=2.0,<3`. Verified: the full suite passes under 2.3.0,
@@ -19,7 +19,7 @@ including the error paths (`ToolError` → `isError`) and `[json, image]` return
 semantic change — sync tools run on a worker thread, so calls can overlap — is covered by a
 concurrency e2e and the existing locks. Python 3.10 stays supported.
 
-## 0.4.0 — shared vision service (done 2026-11-01, unreleased)
+## 0.4.0 — shared vision service (done 2026-11-01, released 2026-11-14)
 
 Implemented as planned below (`vision_service.py`, 10 GPU-less tests via a fake parser). Still a
 manual check: the real-GPU path on a multi-agent run — `status().vision.omniparser.service.served`
@@ -49,7 +49,7 @@ Unix socket (`$XDG_RUNTIME_DIR/glovebox-vision.sock`); the server processes beco
 
 Ordering: landed right after the MCP SDK 2.x migration, both in 0.4.0.
 
-## 0.4.0 — host bridge (done 2026-11-14, unreleased)
+## 0.4.0 — host bridge (done 2026-11-14, released 2026-11-14)
 
 Found by the maintainer typing into a sandbox window on a Slovenian keyboard: no `@` (Xephyr
 maps AltGr as plain Alt) and no copy/paste with the desktop (separate X servers). Fixed with a
