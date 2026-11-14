@@ -279,7 +279,7 @@ def test_window_info_and_app_log(x99, xmessage_window):
             assert r.is_error and "no app log" in payload(r)["error"]
 
             r = await s.call_tool("open_file", {"filepath": "/etc/hostname", "instance": DISP, "app": "no-such-app"})
-            assert r.is_error and "exited immediately" in payload(r)["error"]
+            assert r.is_error and "command not found" in payload(r)["error"]   # named, even behind dbus-run-session
 
             if HAS_XMESSAGE:
                 r = await s.call_tool("open_file", {"filepath": "/etc/hostname", "instance": DISP, "app": "xmessage"})
