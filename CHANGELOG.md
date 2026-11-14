@@ -8,6 +8,8 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-14
+
 ### Added
 - `put_file(name, content, encoding, overwrite)` — write a text or base64
   file (max 10 MB) into the instance's staging folder, so an agent without
