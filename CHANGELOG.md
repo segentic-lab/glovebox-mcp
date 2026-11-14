@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-14
 
 ### Added
 - **Five tools** (23 → 28): `find_elements(query, type)` (parse + filter in one

@@ -56,7 +56,21 @@ maps AltGr as plain Alt) and no copy/paste with the desktop (separate X servers)
 per-instance bridge process (`host_bridge.py`): host keymap copied and kept equal, clipboard
 text mirrored both ways. Not done: images on the clipboard, the PRIMARY selection.
 
-## 0.4.x — candidates, not yet committed
+## 0.5.0 — review round (released 2026-11-14)
+
+Whole-server review (two independent reviewers + a full read): the host display refused,
+a done action never reported as failed, per-instance locks, pre-validated keys, the vision
+service hardened, ScreenParser merge fixed, five new tools (find_elements, wait_for_text,
+browser, manage_window, start_app), the Claude Code skill. Details in CHANGELOG 0.5.0.
+
+## 0.5.x — candidates, not yet committed
+
+- Xephyr `-ac` → an xauth cookie per instance (today any local user can attach to an instance
+  display); touches the bridges and the tests.
+- Clipboard sync for images (text only today); PRIMARY selection.
+- Synchronous maximize-after-launch with the result in `warnings`.
+
+## 0.4.x — candidates (older)
 
 - ~~`navigate(url)` / `page_text()` over CDP~~ — done as `browser(action=info|navigate|text|eval)`
   (2026-11-14); kept to those four, periscope remains the browser-automation server.
