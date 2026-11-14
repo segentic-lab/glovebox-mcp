@@ -27,6 +27,8 @@ def _vision(monkeypatch, **kw):
     v = {"requested": "auto", "effective": "none", "ready": True, "reason": "test", "fallback": False, **kw}
     monkeypatch.setitem(server._VISION, "value", v)
     monkeypatch.setitem(server._VISION, "at", time.time() + 10**6)
+    # the fake instance numbers these tests use must not depend on what displays exist on the box
+    monkeypatch.setattr(server, "display_up", lambda n, timeout=5: True)
 
 
 def test_all_tools_registered():
