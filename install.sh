@@ -80,13 +80,13 @@ elif command -v apt-get >/dev/null 2>&1; then
     echo "✗ apt failed — run it yourself, then re-run: sudo apt-get install -y $APT_PKGS"; exit 1; }
 elif command -v dnf >/dev/null 2>&1; then
   echo "▶ Missing:$MISS — install with dnf, then re-run this script:"
-  echo "    sudo dnf install -y xorg-x11-server-Xephyr openbox scrot xorg-x11-utils xorg-x11-xkb-utils xorg-x11-server-utils xdotool wmctrl xclip tesseract tesseract-langpack-slv"; exit 1
+  echo "    sudo dnf install -y xorg-x11-server-Xephyr openbox scrot xorg-x11-utils xorg-x11-xkb-utils xorg-x11-server-utils xdotool wmctrl xclip tesseract tesseract-langpack-slv at-spi2-core python3-gobject"; exit 1
 elif command -v pacman >/dev/null 2>&1; then
   echo "▶ Missing:$MISS — install with pacman, then re-run this script:"
-  echo "    sudo pacman -S --needed xorg-server-xephyr openbox scrot xorg-xdpyinfo xorg-xkbcomp xorg-setxkbmap xorg-xmodmap xdotool wmctrl xclip tesseract tesseract-data-slv tesseract-data-eng"; exit 1
+  echo "    sudo pacman -S --needed xorg-server-xephyr openbox scrot xorg-xdpyinfo xorg-xkbcomp xorg-setxkbmap xorg-xmodmap xdotool wmctrl xclip tesseract tesseract-data-slv tesseract-data-eng at-spi2-core python-gobject"; exit 1
 else
   echo "▶ Missing:$MISS — install these tools with your package manager, then re-run:"
-  echo "    Xephyr, openbox, scrot, xdpyinfo (x11-utils), xkbcomp + setxkbmap (x11-xkb-utils), xmodmap, xdotool, wmctrl, xclip, tesseract (+ slv data)"; exit 1
+  echo "    Xephyr, openbox, scrot, xdpyinfo (x11-utils), xkbcomp + setxkbmap (x11-xkb-utils), xmodmap, xdotool, wmctrl, xclip, tesseract (+ slv data); optional: at-spi2-core + PyGObject for the system python3 (fill's focus check)"; exit 1
 fi
 
 # ---- python env (deps come from pyproject's extras: one source of truth) ----
