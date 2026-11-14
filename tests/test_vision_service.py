@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import struct
 import threading
 import time
 
@@ -116,9 +117,11 @@ def test_ensure_running_spawns_once_and_reuses(sock_path):
 # ---------- the server's client path ----------
 @pytest.fixture
 def local_mode(monkeypatch):
-    monkeypatch.setitem(server.VISION, "effective", "local")
-    monkeypatch.setitem(server.VISION, "ready", True)
+    monkeypatch.setitem(server._VISION, "value", {"requested": "auto", "effective": "local", "ready": True,
+                                                   "reason": "test", "fallback": False})
+    monkeypatch.setitem(server._VISION, "at", time.time() + 10**6)
     monkeypatch.setattr(server, "_grab_checked", lambda n, a: Image.new("RGB", (400, 300), "white"))
+    monkeypatch.setattr(server, "display_up", lambda n, timeout=5: True)   # fake instances 5..8
     monkeypatch.setattr(server, "TMP", str(server.TMP))
     monkeypatch.setattr(server, "USE_SERVICE", True)
     server._SERVICE_FAILED_AT[0] = 0.0
@@ -155,3 +158,70 @@ def test_service_disabled_env(local_mode, monkeypatch):
     monkeypatch.setattr(server, "USE_SERVICE", False)
     monkeypatch.setattr(server._OMNI, "parse", lambda img, bt, ann: [])
     assert server._do_parse(8)["via"] == "in-process"
+
+
+def test_oversized_and_undecodable_frames_are_answered_not_dropped(service, sock_path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(sock_path)
+    s.sendall(b"\x00\x00\x00\x05" + b"{}" + b"\x00\x00\x00\x00")  # header length lies -> ValueError, closed
+    s.close()
+    # a frame that is not a PNG is answered structurally (the client's fault), not dropped
+    header, _ = vs.request({"op": "parse"}, b"not a png", path=sock_path)
+    assert header["ok"] is False and "decode" in header["error"]
+    assert vs.ping(sock_path)["running"]                              # the service survived both
+    big = struct.pack("!I", 2) + b"{}" + struct.pack("!I", vs.MAX_PAYLOAD + 1)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sock_path); s.sendall(big); s.close()
+    assert vs.ping(sock_path)["running"]
+
+
+def test_status_polls_do_not_reset_the_idle_clock(service, sock_path):
+    service.last_activity = time.time() - 100
+    assert vs.ping(sock_path)["idle_s"] >= 99
+    vs.parse(Image.new("RGB", (8, 8)), 0.05, sock_path + ".png", path=sock_path)
+    assert vs.ping(sock_path)["idle_s"] < 5
+
+
+def test_slow_service_is_busy_not_unreachable(sock_path):
+    class Slow(vs.FakeParser):
+        def parse(self, img, bt, ann):
+            time.sleep(1.0)
+            return super().parse(img, bt, ann)
+    svc = vs.Service(sock_path, parser=Slow(), idle_s=60)
+    t = threading.Thread(target=svc.serve_forever, daemon=True)
+    t.start()
+    while not vs.ping(sock_path):
+        time.sleep(0.05)
+    try:
+        monkey = vs.PARSE_TIMEOUT_S
+        vs.PARSE_TIMEOUT_S = 0.2
+        try:
+            with pytest.raises(vision.VisionError) as e:
+                vs.parse(Image.new("RGB", (8, 8)), 0.05, sock_path + ".png", path=sock_path)
+            assert "busy" in e.value.error
+        finally:
+            vs.PARSE_TIMEOUT_S = monkey
+    finally:
+        svc.stop_event.set()
+        t.join(timeout=5)
+
+
+def test_shutdown_drains_in_flight_parse(sock_path):
+    class Slow(vs.FakeParser):
+        def parse(self, img, bt, ann):
+            time.sleep(0.8)
+            return super().parse(img, bt, ann)
+    svc = vs.Service(sock_path, parser=Slow(), idle_s=60)
+    t = threading.Thread(target=svc.serve_forever, daemon=True)
+    t.start()
+    while not vs.ping(sock_path):
+        time.sleep(0.05)
+    result = {}
+    def go():
+        result["elems"] = vs.parse(Image.new("RGB", (8, 8)), 0.05, sock_path + ".png", path=sock_path)[0]
+    w = threading.Thread(target=go); w.start()
+    time.sleep(0.2)
+    assert vs.stop(sock_path)                      # shutdown requested while the parse runs
+    w.join(timeout=5)
+    assert result["elems"][0]["label"] == "fake element"   # it still got its answer
+    t.join(timeout=5)
+    assert not t.is_alive() and not os.path.exists(sock_path)

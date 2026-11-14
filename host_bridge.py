@@ -37,18 +37,16 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
+from _paths import disp as _disp, display_up, tmp_dir
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-TMP = os.path.join(tempfile.gettempdir(), f"glovebox-{os.getuid()}")
+TMP = tmp_dir()
 POLL_S = float(os.environ.get("GLOVEBOX_CLIPBOARD_POLL", "0.5"))
 KEYMAP_CHECK_S = 5.0
+LIVENESS_CHECK_S = 5.0     # xdpyinfo probe cadence; two consecutive failures = the display is gone
 XCLIP_TIMEOUT = 3
-
-
-def _disp(n) -> str:
-    return n if isinstance(n, str) and n.startswith(":") else f":{int(n)}"
 
 
 # ---------------------------------------------------------------- keyboard
@@ -186,13 +184,6 @@ def write_clipboard(env: dict, text: str) -> bool:
         return False
 
 
-def display_up(disp: str) -> bool:
-    try:
-        return subprocess.run(["xdpyinfo", "-display", disp], capture_output=True, timeout=5).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
 class ClipboardSync:
     """One step = read both sides, propagate the side that changed. The IO is injectable so the
     policy is testable without an X server.
@@ -247,7 +238,9 @@ def log_path(n) -> str:
 
 
 def running(n) -> bool:
-    """True when a bridge process holds the instance's lock (probing never creates the file)."""
+    """True when a bridge process holds the instance's lock (probing never creates the file).
+    The probe takes the lock for a few microseconds; a bridge starting at that instant retries
+    (see run_bridge), so a probe cannot make it give up."""
     if not os.path.exists(lock_path(n)):
         return False
     try:
@@ -268,11 +261,15 @@ def run_bridge(n, host: str, interval: float = POLL_S, log=None, host_env: dict 
     already holds the lock."""
     disp, host = _disp(n), _disp(host)
     log = log or (lambda m: None)
-    os.makedirs(TMP, exist_ok=True)
     lk = open(lock_path(n), "a+")
-    try:
-        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    for attempt in range(5):             # a running() probe may hold the lock for an instant
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        lk.close()
         log(f"another bridge already serves {disp}")
         return 2
     henv = host_env or {**os.environ, "DISPLAY": host}
@@ -284,8 +281,8 @@ def run_bridge(n, host: str, interval: float = POLL_S, log=None, host_env: dict 
     log(f"bridging {host} <-> {disp}: clipboard={'every %ss' % interval if clip else 'off (no xclip)'}, "
         f"keymap={'checked every %ss' % KEYMAP_CHECK_S if keep_keymap else 'not enforced'} (pid {os.getpid()})")
     down = 0
-    tick = 0
     next_kb = 0.0
+    next_live = time.time() + LIVENESS_CHECK_S
     try:
         while True:
             ev = sync.step() if clip else "idle"
@@ -298,18 +295,23 @@ def run_bridge(n, host: str, interval: float = POLL_S, log=None, host_env: dict 
                 if hs and is_ and hs != is_:
                     err = copy_keymap(disp, host, henv)
                     log("keymap diverged from the host — re-copied" if not err else f"keymap re-copy failed: {err}")
-            tick += 1
-            if tick % 10 == 0 or (clip and ev == "idle" and sync.read_inst() is None):
-                down = down + 1 if not display_up(disp) else 0
+            if now >= next_live:
+                next_live = now + LIVENESS_CHECK_S
+                up = display_up(disp)
+                if up is None:            # xdpyinfo missing: cannot tell, keep serving
+                    down = 0
+                else:
+                    down = down + 1 if not up else 0
                 if down >= 2:
                     log(f"{disp} is gone — exiting")
                     return 0
             time.sleep(interval)
     finally:
+        # the lock file stays (unlinking it while another bridge opens it is the classic
+        # unlink race that ends with two bridges); releasing the lock is what matters
         try:
             fcntl.flock(lk, fcntl.LOCK_UN)
             lk.close()
-            os.unlink(lock_path(n))
         except OSError:
             pass
 
@@ -319,7 +321,6 @@ def spawn(n, host: str, host_env: dict = None):
     when a bridge is already running."""
     if running(n):
         return None
-    os.makedirs(TMP, exist_ok=True)
     cmd = [sys.executable, os.path.join(HERE, "host_bridge.py"), "serve", _disp(n), "--host", _disp(host)]
     with open(log_path(n), "ab") as lf:
         p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=lf, stderr=lf, env=host_env,

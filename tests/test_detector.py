@@ -82,3 +82,34 @@ def test_detector_selection_rules(monkeypatch, tmp_path):
 def test_status_exposes_detector():
     info = vision.omniparser_info()
     assert set(info["detector"]) == {"requested", "effective", "screenparser_weights", "reason"}
+
+
+def test_container_keeps_a_child_of_another_class_and_ties_go_to_confidence():
+    dets = [{"bbox": box(0.1, 0.1, 0.6, 0.15), "cls": "Text Input", "conf": 0.7},
+            {"bbox": box(0.57, 0.11, 0.59, 0.14), "cls": "Utility Button", "conf": 0.4},   # clear (x) inside the input
+            {"bbox": box(0.1, 0.5, 0.3, 0.55), "cls": "Button", "conf": 0.3},
+            {"bbox": box(0.1, 0.5, 0.3, 0.55), "cls": "Link", "conf": 0.9}]               # identical box: Link wins
+    out = vision.merge_detections(dets, [{"bbox": box(0.11, 0.11, 0.3, 0.14), "content": "Search"}])
+    classes = sorted(e["class"] for e in out)
+    assert classes == ["Link", "Text Input", "Utility Button"], classes
+    assert next(e for e in out if e["class"] == "Text Input")["content"] == "Search"
+
+
+def test_degenerate_and_out_of_image_boxes_are_dropped_or_clamped():
+    dets = [{"bbox": box(0.5, 0.5, 0.5004, 0.6), "cls": "Badge", "conf": 0.9},     # 0.4 px wide at 1000 px
+            {"bbox": box(0.9, 0.9, 1.3, 1.2), "cls": "Button", "conf": 0.9}]       # spills past the edge
+    out = vision.merge_detections(dets, [], size=(1000, 1000))
+    assert [e["class"] for e in out] == ["Button"]
+    assert out[0]["bbox"] == [0.9, 0.9, 1.0, 1.0]
+    assert vision._center(out[0]["bbox"], 1000, 1000) == [950, 950]
+    assert vision._center([0.98, 0.98, 1.2, 1.2], 100, 100) == [99, 99]            # clamped into the display
+
+
+def test_line_grouping_splits_menu_bar_gaps():
+    # "File" "Edit" far apart on one tesseract line, "Sign" "in" adjacent on another
+    data = {"text": ["File", "Edit", "Sign", "in"], "conf": [95, 95, 95, 95],
+            "left": [10, 200, 10, 50], "top": [10, 10, 100, 100], "width": [30, 30, 35, 15], "height": [12, 12, 12, 12],
+            "block_num": [1, 1, 2, 2], "par_num": [1, 1, 1, 1], "line_num": [1, 1, 1, 1]}
+    elems, boxes = vision.group_tesseract(data, "line")
+    assert [e["label"] for e in elems] == ["File", "Edit", "Sign in"]
+    assert boxes[2] == (10, 100, 65, 112)

@@ -44,6 +44,8 @@ MIN_VRAM_MB = 6000        # OmniParser (YOLO + Florence-2) needs ~6 GB; below th
 TIGHT_VRAM_MB = 8000      # works, but close other GPU apps
 MIN_FREE_VRAM_MB = 4500   # free memory needed at model-load time
 OCR_MIN_CONF = 45         # tesseract word confidence floor
+GAP_FACTOR = 1.5          # 'line' grouping splits at gaps wider than this x the word height (menu bars)
+OCR_TIMEOUT_S = 30        # a hung tesseract must not hang the tool call
 OCR_SCALE_DEFAULT = 2.0   # UI text is ~12-16 px; tesseract wants ~2x that (measured: 1x found nothing, 2x read it at 96%)
 DEFAULT_TESS_LANGS = ("slv", "eng")
 
@@ -56,7 +58,6 @@ class VisionError(Exception):
         self.error, self.fix = error, fix
 
 
-# ---------- requested mode ----------
 # ---------- detector choice inside the local backend ----------
 # OmniParser's own detector (icon_detect, YOLOv8) finds "interactable icons" and nothing else: every
 # box it emits is type "icon". ScreenParser (docling-project, ICML 2026) is a YOLO11-L trained on
@@ -127,19 +128,56 @@ def _overlap(a, b) -> float:
     return max(i / (aa + ab - i + 1e-6), i / aa, i / ab)
 
 
+def _iou(a, b) -> float:
+    i = _inter(a, b)
+    u = _box_area(a) + _box_area(b) - i
+    return i / u if u > 0 else 0.0
+
+
 def _inside(a, b) -> bool:
     aa = _box_area(a)
     return aa > 0 and _inter(a, b) / aa > 0.80
 
 
-def merge_detections(dets: list, ocr: list, iou_threshold: float = 0.7) -> list:
+def _clamp_box(b, size=None):
+    """Box clamped to the image; None when degenerate (under 2 px a side when `size` is known —
+    OmniParser's captioner silently skips crops it cannot make, which would shift every caption
+    after it onto the wrong element)."""
+    x1, y1, x2, y2 = (min(1.0, max(0.0, float(v))) for v in b)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    if size and ((x2 - x1) * size[0] < 2 or (y2 - y1) * size[1] < 2):
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _duplicate(d, e, iou_threshold) -> bool:
+    """Is detection d redundant next to e? Same class: OmniParser's rule (a box that mostly
+    covers or is covered by another of its kind is a duplicate; the smaller one survives, ties
+    go to the higher confidence). Different classes: only a near-identical box (IoU) — a Text
+    Input must keep its clear-icon child, a List Item its Button."""
+    a, b = d["bbox"], e["bbox"]
+    if d["cls"] == e["cls"]:
+        if _overlap(a, b) <= iou_threshold:
+            return False
+        aa, ab = _box_area(a), _box_area(b)
+        if aa != ab:
+            return aa > ab
+        return (d["conf"], -d["_i"]) < (e["conf"], -e["_i"])
+    return _iou(a, b) > iou_threshold and (d["conf"], -d["_i"]) < (e["conf"], -e["_i"])
+
+
+def merge_detections(dets: list, ocr: list, iou_threshold: float = 0.7, size=None) -> list:
     """Combine ScreenParser detections with OCR lines into glovebox elements (no GPU; pure).
 
     dets: [{"bbox": [x1,y1,x2,y2] in 0..1, "cls": ScreenParser class, "conf": float}]
-    ocr:  [{"bbox": [...], "content": str}]
+    ocr:  [{"bbox": [...], "content": str}]      size: (W, H) pixels, for the degenerate-box filter
     Rules (OmniParser's merge, made class-aware):
+      * boxes are clamped to the image; degenerate ones (< 2 px) are dropped;
       * container classes are dropped (see SP_TYPES);
-      * of two detections overlapping > iou_threshold the smaller survives;
+      * duplicates: same-class boxes that mostly overlap keep the smaller (ties: the more
+        confident); different classes are duplicates only when near-identical (IoU) — so a
+        Text Input keeps the icon inside it;
       * a Text/Heading detection that contains OCR lines is dropped — the lines are the better
         targets; one with no OCR inside stays (type "text", captioned later);
       * any other detection absorbs the OCR lines inside it as its label (a button gets its
@@ -147,15 +185,20 @@ def merge_detections(dets: list, ocr: list, iou_threshold: float = 0.7) -> list:
       * remaining OCR lines become type "text".
     Returns elements [{"type", "bbox", "content", "interactive", "class", "conf"}] with the
     caption-needing ones (content None) LAST, as OmniParser's captioner expects."""
-    cand = [d for d in dets if d["cls"] in SP_TYPES and _box_area(d["bbox"]) > 0]
-    kept = []
-    for i, d in enumerate(cand):
-        if any(j != i and _overlap(d["bbox"], e["bbox"]) > iou_threshold and _box_area(d["bbox"]) > _box_area(e["bbox"])
-               for j, e in enumerate(cand)):
+    cand = []
+    for i, d in enumerate(dets):
+        if d["cls"] not in SP_TYPES:
             continue
-        kept.append(d)
+        bb = _clamp_box(d["bbox"], size)
+        if bb:
+            cand.append({**d, "bbox": bb, "_i": i})
+    kept = [d for d in cand if not any(e is not d and _duplicate(d, e, iou_threshold) for e in cand)]
     kept.sort(key=lambda d: _box_area(d["bbox"]))          # small boxes claim their text first
-    pool = [dict(o) for o in ocr if _box_area(o["bbox"]) > 0]
+    pool = []
+    for o in ocr:
+        bb = _clamp_box(o["bbox"], size)
+        if bb:
+            pool.append({**o, "bbox": bb})
     out = []
     for d in kept:
         typ = SP_TYPES[d["cls"]]
@@ -180,6 +223,7 @@ def merge_detections(dets: list, ocr: list, iou_threshold: float = 0.7) -> list:
     return out
 
 
+# ---------- requested mode ----------
 def requested_mode() -> str:
     """GLOVEBOX_VISION env, else the .vision-mode file written by install.sh, else 'auto'."""
     m = os.environ.get("GLOVEBOX_VISION")
@@ -286,17 +330,23 @@ def omniparser_info(gpu: dict = None) -> dict:
     else:
         reason = "ok" if gpu["note"] == "ok" else gpu["note"]
     ready = code and weights and torch_ok and gpu["present"] and gpu["enough"]
-    return {"code": code, "weights": weights, "torch": torch_ok, "gpu": gpu, "ready": ready, "reason": reason,
-            "detector": detector_info()}
+    # loadable: enough FREE memory to load the models now (irrelevant once a service holds them)
+    loadable = ready and (gpu["vram_free_mb"] is None or gpu["vram_free_mb"] >= MIN_FREE_VRAM_MB)
+    return {"code": code, "weights": weights, "torch": torch_ok, "gpu": gpu, "ready": ready, "loadable": loadable,
+            "reason": reason, "detector": detector_info()}
 
 
-def resolve(requested: str = None, omni: dict = None, tess: dict = None) -> dict:
+def resolve(requested: str = None, omni: dict = None, tess: dict = None, service_loaded: bool = False) -> dict:
     """Pick the effective backend. Returns {requested, effective, ready, reason, fallback}.
     `ready` is False only when an explicitly requested backend is unusable (auto always lands
-    on something usable, 'none' at worst)."""
+    on something usable, 'none' at worst). `service_loaded`: a vision service already holds
+    the models, so free-VRAM at load time no longer matters for auto."""
     requested = requested or requested_mode()
     omni = omni if omni is not None else omniparser_info()
     tess = tess if tess is not None else tesseract_info()
+    if omni.get("ready") and not omni.get("loadable", True) and not service_loaded:
+        # usable hardware, but not enough free memory to load right now: auto must not pick it
+        omni = {**omni, "ready": False, "reason": omni["gpu"]["note"]}
     if requested == "local":
         return {"requested": "local", "effective": "local", "ready": omni["ready"],
                 "reason": omni["reason"], "fallback": False}
@@ -329,9 +379,11 @@ def ocr_scale() -> float:
 
 def group_tesseract(data: dict, granularity: str = "line", min_conf: int = OCR_MIN_CONF, scale: float = 1.0):
     """Turn pytesseract image_to_data output into elements. 'line' merges words that tesseract
-    put on the same line ("Sign" + "in" -> "Sign in", one target); 'word' keeps single words.
-    `scale` is the upscale factor the image was OCR'd at; boxes are mapped back to screen pixels.
-    Returns (elems, boxes) with ids assigned in reading order."""
+    put on the same line ("Sign" + "in" -> "Sign in", one target) but SPLITS a line where the
+    gap between two words is wider than GAP_FACTOR x the line's word height — a menu bar
+    "File   Edit   View" is three targets, not one whose centre is blank space; 'word' keeps
+    single words. `scale` is the upscale factor the image was OCR'd at; boxes are mapped back
+    to screen pixels. Returns (elems, boxes), ids in tesseract's block/line order."""
     groups = {}
     order = []
     n = len(data["text"])
@@ -346,32 +398,41 @@ def group_tesseract(data: dict, granularity: str = "line", min_conf: int = OCR_M
         x, y, w, h = (int(round(int(data[k][i]) / scale)) for k in ("left", "top", "width", "height"))
         key = (i,) if granularity == "word" else (data["block_num"][i], data["par_num"][i], data["line_num"][i])
         if key not in groups:
-            groups[key] = {"words": [], "confs": [], "box": [x, y, x + w, y + h]}
+            groups[key] = []
             order.append(key)
-        g = groups[key]
-        g["words"].append(txt)
-        g["confs"].append(conf)
-        b = g["box"]
-        g["box"] = [min(b[0], x), min(b[1], y), max(b[2], x + w), max(b[3], y + h)]
+        groups[key].append((x, y, w, h, txt, conf))
     elems, boxes = [], {}
     for key in order:
-        g = groups[key]
-        x0, y0, x1, y1 = g["box"]
-        eid = len(elems)
-        elems.append({"id": eid, "type": "text", "label": " ".join(g["words"]), "interactive": None,
-                      "center": [(x0 + x1) // 2, (y0 + y1) // 2],
-                      "confidence": round(sum(g["confs"]) / len(g["confs"]))})
-        boxes[eid] = (x0, y0, x1, y1)
+        words = sorted(groups[key], key=lambda t: t[0])
+        heights = sorted(t[3] for t in words)
+        gap_limit = max(8, GAP_FACTOR * heights[len(heights) // 2])
+        runs, run = [], [words[0]]
+        for prev, cur in zip(words, words[1:]):
+            if cur[0] - (prev[0] + prev[2]) > gap_limit:
+                runs.append(run)
+                run = []
+            run.append(cur)
+        runs.append(run)
+        for run in runs:
+            x0, y0 = min(t[0] for t in run), min(t[1] for t in run)
+            x1, y1 = max(t[0] + t[2] for t in run), max(t[1] + t[3] for t in run)
+            eid = len(elems)
+            elems.append({"id": eid, "type": "text", "label": " ".join(t[4] for t in run), "interactive": None,
+                          "center": [(x0 + x1) // 2, (y0 + y1) // 2],
+                          "confidence": round(sum(t[5] for t in run) / len(run))})
+            boxes[eid] = (x0, y0, x1, y1)
     return elems, boxes
 
 
 def parse_tesseract(img, granularity: str = "line"):
+    """The `basic` backend: tesseract over a grayscale, auto-contrasted, upscaled frame.
+    Returns (elems, boxes) like group_tesseract; raises VisionError with the fix named."""
     try:
         import pytesseract
         from pytesseract import Output
     except ImportError:
         raise VisionError("pytesseract is not installed",
-                          "pip install pytesseract (or ./install.sh basic), or set GLOVEBOX_VISION=none")
+                          "pip install pytesseract (or ./install.sh basic), or set GLOVEBOX_VISION=none") from None
     lang = tesseract_lang_string()
     from PIL import Image, ImageOps
     # Grayscale + autocontrast first: measured on a CI frame (small white window on a black root)
@@ -385,14 +446,17 @@ def parse_tesseract(img, granularity: str = "line"):
     for scale in dict.fromkeys((ocr_scale(), 1.0)):
         im = gray if scale == 1.0 else gray.resize((int(gray.width * scale), int(gray.height * scale)), Image.LANCZOS)
         try:
-            data = pytesseract.image_to_data(im, lang=lang, output_type=Output.DICT)
+            data = pytesseract.image_to_data(im, lang=lang, output_type=Output.DICT, timeout=OCR_TIMEOUT_S)
         except pytesseract.TesseractNotFoundError:
             raise VisionError("tesseract binary not found",
-                              "install tesseract-ocr (./install.sh basic) or set GLOVEBOX_VISION=none")
+                              "install tesseract-ocr (./install.sh basic) or set GLOVEBOX_VISION=none") from None
+        except RuntimeError as e:   # pytesseract raises RuntimeError on its timeout
+            raise VisionError(f"tesseract did not finish within {OCR_TIMEOUT_S} s: {str(e)[:120]}",
+                              "retry; lower GLOVEBOX_OCR_SCALE, or parse a smaller instance") from None
         except Exception as e:   # TesseractError: bad language data etc.
             raise VisionError(f"tesseract failed (lang={lang}): {str(e)[:200]}",
                               "install the language data (apt install tesseract-ocr-<lang>) or set "
-                              "GLOVEBOX_TESS_LANG to an installed language (`tesseract --list-langs`)")
+                              "GLOVEBOX_TESS_LANG to an installed language (`tesseract --list-langs`)") from None
         elems, boxes = group_tesseract(data, granularity, scale=scale)
         words = sum(len(e["label"].split()) for e in elems)
         if best is None or words > best[0]:
@@ -401,6 +465,14 @@ def parse_tesseract(img, granularity: str = "line"):
 
 
 # ---------- OmniParser backend ----------
+def _center(bb, W, H) -> list:
+    """Pixel centre of a ratio box, clamped into the display (a box that spills past 1.0 must
+    not yield an off-screen click target)."""
+    cx = int((float(bb[0]) + float(bb[2])) / 2 * W)
+    cy = int((float(bb[1]) + float(bb[3])) / 2 * H)
+    return [min(max(cx, 0), max(W - 1, 0)), min(max(cy, 0), max(H - 1, 0))]
+
+
 class OmniParser:
     """Lazy-loaded OmniParser (YOLO icon detector + Florence-2 captioner) with a GPU preflight."""
 
@@ -422,7 +494,7 @@ class OmniParser:
                               "run ./install.sh local (needs an NVIDIA GPU with >= 6 GB VRAM), or set "
                               "GLOVEBOX_VISION=basic / none")
         gpu = info["gpu"]
-        if gpu["vram_free_mb"] is not None and gpu["vram_free_mb"] < MIN_FREE_VRAM_MB:
+        if not info["loadable"]:
             raise VisionError(f"not enough free GPU memory to load OmniParser: {gpu['vram_free_mb']} MiB free, "
                               f"~{MIN_FREE_VRAM_MB} MiB needed ({gpu['name']})",
                               "close other GPU applications and retry, or set GLOVEBOX_VISION=basic")
@@ -467,67 +539,84 @@ class OmniParser:
             self.load_seconds = round(time.time() - t0, 1)
 
     def parse(self, img, box_threshold: float, annotated_path: str):
+        """Elements for one frame; writes the numbered Set-of-Mark image to annotated_path.
+        Raises VisionError (fix named) for every failure; never returns a partial list."""
         self.load()
         from util.utils import check_ocr_box, get_som_labeled_img
         import base64
+        import tempfile
         W, H = img.width, img.height
-        frame = annotated_path.replace("annotated", "frame")
-        img.save(frame)
+        # OmniParser's OCR wants a file; a private temp file, removed afterwards (frames are
+        # screenshots of the sandbox — they must not pile up in the temp dir)
+        fd, frame = tempfile.mkstemp(prefix="glovebox-frame-", suffix=".png")
+        os.close(fd)
         try:
-            (ocr_text, ocr_bbox), _ = check_ocr_box(frame, display_img=False, output_bb_format="xyxy",
-                                                    easyocr_args={"paragraph": False, "text_threshold": 0.8},
-                                                    use_paddleocr=False)
-            if self.detector == "screenparser":
-                return self._parse_screenparser(img, ocr_text, ocr_bbox, annotated_path)
-            b64, _lc, parsed = get_som_labeled_img(frame, self._yolo, BOX_TRESHOLD=box_threshold,
-                                                   output_coord_in_ratio=True, ocr_bbox=ocr_bbox,
-                                                   caption_model_processor=self._cap, ocr_text=ocr_text,
-                                                   iou_threshold=0.7, imgsz=640)
-        except VisionError:
-            raise
-        except Exception as e:
-            if "out of memory" in str(e).lower():
-                raise VisionError(f"GPU out of memory during parse: {str(e)[:160]}",
-                                  "close other GPU applications, or parse a smaller instance (launch_app size=), "
-                                  "or set GLOVEBOX_VISION=basic")
-            raise VisionError(f"OmniParser parse failed: {str(e)[:200]}",
-                              "retry once; if it persists, re-run ./install.sh local")
+            img.save(frame)
+            try:
+                (ocr_text, ocr_bbox), _ = check_ocr_box(frame, display_img=False, output_bb_format="xyxy",
+                                                        easyocr_args={"paragraph": False, "text_threshold": 0.8},
+                                                        use_paddleocr=False)
+                if self.detector == "screenparser":
+                    return self._parse_screenparser(img, box_threshold, ocr_text, ocr_bbox, annotated_path)
+                b64, _lc, parsed = get_som_labeled_img(frame, self._yolo, BOX_TRESHOLD=box_threshold,
+                                                       output_coord_in_ratio=True, ocr_bbox=ocr_bbox,
+                                                       caption_model_processor=self._cap, ocr_text=ocr_text,
+                                                       iou_threshold=0.7, imgsz=640)
+            except VisionError:
+                raise
+            except Exception as e:
+                if "out of memory" in str(e).lower():
+                    raise VisionError(f"GPU out of memory during parse: {str(e)[:160]}",
+                                      "close other GPU applications, or parse a smaller instance (launch_app size=), "
+                                      "or set GLOVEBOX_VISION=basic") from None
+                raise VisionError(f"OmniParser parse failed: {str(e)[:200]}",
+                                  "retry once; if it persists, re-run ./install.sh local") from None
+        finally:
+            try:
+                os.unlink(frame)
+            except OSError:
+                pass
         with open(annotated_path, "wb") as f:
             f.write(base64.b64decode(b64))
-        elems = []
-        for e in parsed:
-            bb = e.get("bbox") or e.get("box")
-            if not bb or len(bb) < 4:
-                continue
-            elems.append({"id": len(elems), "type": e.get("type"), "label": e.get("content"),
-                          "interactive": e.get("interactivity"),
-                          "center": [int((bb[0] + bb[2]) / 2 * W), int((bb[1] + bb[3]) / 2 * H)]})
-        return elems
+        # ids must match the numbers drawn on the annotated image: keep OmniParser's order 1:1
+        return [{"id": i, "type": e.get("type"), "label": e.get("content"), "interactive": e.get("interactivity"),
+                 "center": _center(e.get("bbox") or e.get("box") or [0, 0, 0, 0], W, H)}
+                for i, e in enumerate(parsed)]
 
-    def _parse_screenparser(self, img, ocr_text, ocr_bbox, annotated_path):
+    def _parse_screenparser(self, img, box_threshold, ocr_text, ocr_bbox, annotated_path):
         """ScreenParser detector + OmniParser's OCR/captioner/annotator. Same element shape as the
-        default path plus "class" (the ScreenParser class) and typed "type" values."""
+        default path plus "class" (the ScreenParser class) and typed "type" values. The detector
+        confidence floor is max(box_threshold, SCREENPARSER_CONF): the agent can raise it to cut
+        noise, never lower it below the model card's setting."""
         import numpy as np
         import torch
         from torchvision.ops import box_convert
         from util.utils import annotate, get_parsed_content_icon
         W, H = img.width, img.height
-        res = self._yolo.predict(source=img, conf=SCREENPARSER_CONF, iou=SCREENPARSER_IOU,
+        res = self._yolo.predict(source=img, conf=max(float(box_threshold), SCREENPARSER_CONF), iou=SCREENPARSER_IOU,
                                  imgsz=SCREENPARSER_IMGSZ, verbose=False)[0]
         dets = [{"bbox": [x1 / W, y1 / H, x2 / W, y2 / H], "cls": self._yolo.names[int(c)], "conf": float(p)}
                 for (x1, y1, x2, y2), c, p in zip(res.boxes.xyxy.tolist(), res.boxes.cls.tolist(), res.boxes.conf.tolist())]
         ocr = [{"bbox": [b[0] / W, b[1] / H, b[2] / W, b[3] / H], "content": t}
                for b, t in zip(ocr_bbox or [], ocr_text or [])]
-        elems = merge_detections(dets, ocr)
+        elems = merge_detections(dets, ocr, size=(W, H))
         start = next((i for i, e in enumerate(elems) if e["content"] is None), -1)
         np_img = np.asarray(img.convert("RGB"))
         boxes = torch.tensor([e["bbox"] for e in elems], dtype=torch.float32) if elems else torch.zeros((0, 4))
         if start >= 0:
             # captions for boxes without text (icons, images, inputs): OmniParser's Florence-2 call;
-            # it crops boxes[start:] — when start == 0 it falls back to all boxes, which is right
+            # it crops boxes[start:] — when start == 0 it falls back to all boxes, which is right.
+            # It silently skips crops it cannot make; merge_detections drops degenerate boxes so
+            # that cannot happen, and if the counts still differ no caption is assigned rather
+            # than shifting every caption onto the wrong element.
             caps = get_parsed_content_icon(boxes, start, np_img, self._cap)
-            for e in elems[start:]:
-                e["content"] = caps.pop(0) if caps else None
+            need = elems[start:]
+            if len(caps) == len(need):
+                for e, c in zip(need, caps):
+                    e["content"] = c
+            else:
+                for e in need:
+                    e["content"] = None
         if elems:
             ann, _ = annotate(np_img, box_convert(boxes, "xyxy", "cxcywh"), torch.ones(len(elems)),
                               list(range(len(elems))), text_scale=0.4, text_padding=5)
@@ -535,13 +624,9 @@ class OmniParser:
             _I.fromarray(ann).save(annotated_path)
         else:
             img.save(annotated_path)
-        out = []
-        for e in elems:
-            bb = e["bbox"]
-            out.append({"id": len(out), "type": e["type"], "label": e["content"], "interactive": e["interactive"],
-                        "center": [int((bb[0] + bb[2]) / 2 * W), int((bb[1] + bb[3]) / 2 * H)],
-                        "class": e["class"]})
-        return out
+        return [{"id": i, "type": e["type"], "label": e["content"], "interactive": e["interactive"],
+                 "center": _center(e["bbox"], W, H), "class": e["class"]}
+                for i, e in enumerate(elems)]
 
 
 # ---------- install helper (moved out of install.sh so the server owns the OmniParser lifecycle) ----------
