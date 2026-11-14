@@ -1,6 +1,7 @@
 """No-display smoke tests: the server imports, registers all tools, and keeps its contract helpers
 and vision-resolution rules honest. Everything here runs without an X server or GPU."""
 import json
+import os
 import subprocess
 
 import pytest
@@ -15,7 +16,7 @@ EXPECTED_TOOLS = {
     "launch_app", "list_instances", "close_instance", "get_screen_size", "screenshot",
     "parse_screen", "click", "drag", "double_click", "click_element", "type_text",
     "upload_file", "open_file", "list_files", "press_keys", "move_mouse", "scroll",
-    "wait_ms", "status", "find_elements", "wait_for_text", "start_app", "browser", "manage_window",
+    "wait_ms", "status", "find_elements", "wait_for_text", "start_app", "browser", "manage_window", "put_file",
     # 0.3.0
     "clipboard", "wait_for_stable", "window_info", "app_log",
 }
@@ -34,7 +35,7 @@ def _vision(monkeypatch, **kw):
 def test_all_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
-    assert len(names) == 28
+    assert len(names) == 29
 
 
 def test_descriptions_are_agent_first():
@@ -266,3 +267,41 @@ def test_parse_tesseract_keeps_the_richer_pass(monkeypatch):
     elems, boxes = vision.parse_tesseract(Image.new("RGB", (100, 50), "white"), "line")
     assert calls == [(200, 100), (100, 50)]
     assert [e["label"] for e in elems] == ["Sign in"] and boxes[0] == (10, 10, 65, 22)
+
+
+def test_put_file_writes_only_inside_the_staging_folder(tmp_path, monkeypatch):
+    import base64
+    monkeypatch.setattr(server, "HERE", str(tmp_path))
+    p = json.loads(server.put_file("in/data.csv", "a;b\nč;ž\n", instance=7))
+    assert p["ok"] and p["bytes"] == len("a;b\nč;ž\n".encode()) and p["name"] == "in/data.csv" and p["overwritten"] is False
+    assert open(p["path"], encoding="utf-8").read() == "a;b\nč;ž\n"
+    assert p["path"].startswith(str(tmp_path / "files" / "7"))
+
+    with pytest.raises(ToolError) as e:                       # exists, no overwrite
+        server.put_file("in/data.csv", "x", instance=7)
+    assert "already exists" in json.loads(str(e.value))["error"]
+    assert json.loads(server.put_file("in/data.csv", "x", instance=7, overwrite=True))["overwritten"] is True
+
+    raw = bytes(range(256))
+    p = json.loads(server.put_file("blob.bin", base64.b64encode(raw).decode(), instance=7, encoding="base64"))
+    assert open(p["path"], "rb").read() == raw
+
+    outside = tmp_path / "files" / "evil.txt"
+    for bad in ("../evil.txt", "/etc/evil", "a/../../evil.txt", "", "dir/"):
+        with pytest.raises(ToolError) as e:
+            server.put_file(bad, "x", instance=7)
+        assert "nothing was written" in json.loads(str(e.value))["error"], bad
+    assert not outside.exists()
+    os.symlink(str(tmp_path), str(tmp_path / "files" / "7" / "link"))          # a symlink out of the folder
+    with pytest.raises(ToolError):
+        server.put_file("link/evil.txt", "x", instance=7)
+    assert not (tmp_path / "evil.txt").exists()
+
+    for kw in ({"encoding": "base64", "content": "not base64!!"}, {"encoding": "hex", "content": "00"},
+               {"content": "x" * (server.PUT_MAX + 1)}):
+        with pytest.raises(ToolError):
+            server.put_file("f.txt", instance=7, **{"content": "x", **kw})
+    assert not (tmp_path / "files" / "7" / "f.txt").exists()
+    with pytest.raises(ToolError):                                             # host display / out of range
+        server.put_file("f.txt", "x", instance=0)
+    assert [f for f in os.listdir(tmp_path / "files" / "7") if ".put-" in f] == []   # no temp files left

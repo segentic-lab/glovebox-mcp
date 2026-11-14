@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
+## [Unreleased]
+
+### Added
+- `put_file(name, content, encoding, overwrite)` — write a text or base64
+  file (max 10 MB) into the instance's staging folder, so an agent without
+  shell access can hand the sandbox a file it produced and then
+  `open_file`/`upload_file` it by name. Confined to `files/<N>/` (absolute
+  paths, `..` and symlinks out are refused), atomic, refuses to replace an
+  existing file without `overwrite=true`. 29 tools. (Glama's completeness
+  review listed "no file-write tool" as a gap.)
+
 ## [0.5.1] - 2026-11-14
 
 ### Changed

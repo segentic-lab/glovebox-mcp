@@ -122,7 +122,7 @@ def test_handshake_reports_project_version(x99):
             assert init.server_info.name == "glovebox"
             assert init.server_info.version == __version__
             tools = await s.list_tools()
-            assert len(tools.tools) == 28
+            assert len(tools.tools) == 29
     asyncio.run(run())
 
 

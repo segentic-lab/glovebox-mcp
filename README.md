@@ -102,7 +102,7 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 > **Driving it with an AI agent?** Paste [`AGENTS.md`](AGENTS.md) into the agent's system prompt — it
 > teaches the observe → act → verify loop, grounding, the upload/unicode gotchas, and when to stop.
 
-## Tools (28)
+## Tools (29)
 
 | Tool | What |
 |---|---|
@@ -123,6 +123,7 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | `window_info(instance)` | Active window title + geometry, the visible windows (ids for `manage_window`) and the pointer position — confirm navigation or that an app opened, without an image. |
 | `upload_file(filepath, selector?, page_url_contains?)` | Attach a local file to a page's `<input type=file>` via the **Chrome DevTools Protocol**. The nested X11 file picker is invisible to automation **and hangs the renderer**, so use this for all uploads — never click an upload button expecting a dialog. Works on Chromium-family browsers started by `launch_app`/`start-display.sh` (per-instance `--remote-debugging-port`, `9222+N`). **Browser file inputs only** — for native apps see `open_file`. |
 | `open_file(filepath, app?)` | Open a local file in a **native** app on the instance's display (e.g. `app="gimp"`) or via `xdg-open`. Fails honestly if the handler exits immediately (no app registered for that type). |
+| `put_file(name, content, encoding?, overwrite?)` | Write a file (text, or binary as base64; max 10 MB) into the instance's staging folder — hand the sandbox something you produced, then `open_file`/`upload_file` it by name. Only inside `files/<N>/`: absolute paths, `..` and symlinks out are refused; an existing file needs `overwrite=true`. |
 | `list_files()` | The instance's staging folder `files/<N>/` + entries with size, mtime and a `partial` flag for in-progress downloads. |
 | `app_log(instance, lines?)` | Tail of the launched app's stderr — read it when an app crashed or drew nothing. |
 | `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n \| all_launched=true)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). `list_instances` shows each window's `title`; instances closed by hand disappear and their number is reused. |
@@ -304,7 +305,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 
 ## Files
 
-- `server.py` — the MCP server (all 28 tools).
+- `server.py` — the MCP server (all 29 tools).
 - `vision.py` — vision backends: selection rules, GPU preflight, tesseract grouping, OmniParser lifecycle (`check` / `install-omniparser` CLI).
 - `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
 - `_paths.py` — shared helpers: the 0700 per-user temp dir, display naming, the liveness probe.

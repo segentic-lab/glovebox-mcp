@@ -77,6 +77,7 @@ in one call.
 | Scroll | `scroll(amount, instance, x=…, y=…)` (positive = up, negative = down; `axis="horizontal"` sideways; max 100, `clamped` flagged) |
 | Drag / draw / select / slider | `drag(x1, y1, x2, y2, instance, steps=10)` |
 | Double-click / hover (menus, tooltips) | `double_click(x, y, instance)` · `move_mouse(x, y, instance)` then `screenshot` |
+| Give the sandbox a file you produced | `put_file("data.csv", "a;b\n1;2\n", instance)` (binary: `encoding="base64"`) → `open_file("data.csv")` / `upload_file("data.csv")` |
 | Upload a file to a web form | `upload_file("/path", instance)` — see rules below |
 | Wait for a page / app to finish drawing | `wait_for_stable(instance)` (or `wait_ms(1500)` for a fixed delay) |
 | Confirm navigation without an image | `window_info(instance)` → active window title |

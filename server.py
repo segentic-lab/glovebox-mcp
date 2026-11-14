@@ -35,6 +35,8 @@ Isolation is DISPLAY-level: the agent's input and vision are confined to the Xep
 the apps run as your user with your filesystem. For OS-level isolation run glovebox in a VM/container.
 """
 import atexit
+import base64
+import binascii
 import ctypes
 import ctypes.util
 import fcntl
@@ -88,6 +90,7 @@ FILES_MAX = 200  # list_files entry cap per call (flagged via "truncated")
 WINDOWS_MAX = 50  # window_info visible-window cap
 CLIP_MAX = 100_000  # clipboard(get) characters per call (flagged via "truncated")
 TEXT_MAX = 20_000   # browser(action='text') characters per call
+PUT_MAX = 10 * 1024 * 1024   # put_file bytes per call
 SETTLE_MAX_MS = 5000
 WAIT_MAX_MS = 10000
 SCROLL_MAX = 100
@@ -1532,6 +1535,62 @@ def list_files(instance: int = 1) -> str:
     if truncated:
         rows = rows[:FILES_MAX]
     return _ok("list_files", n, dir=d, count=total, truncated=truncated, files=rows)
+
+
+@mcp.tool()
+def put_file(name: str, content: str, instance: int = 1, encoding: str = "text", overwrite: bool = False) -> str:
+    """Write a file into the instance's staging folder files/<N>/ — the way to hand the sandbox a
+    file you produced (a CSV to import, an SVG to open, a text to upload) without shell access.
+    Then open_file(name) / upload_file(name) / an app's Open dialog can use it by that name.
+
+    `name` is a relative path inside the staging folder ('data.csv', 'in/logo.svg'; parent
+    folders are created); absolute paths and '..' are refused — nothing outside files/<N>/ can be
+    written. `content` is text (written as UTF-8) or, with encoding='base64', binary data.
+    Returns {"ok", "instance", "path", "name", "bytes", "overwritten"}. Fails (isError), writing
+    nothing, if the file exists and overwrite is false, the name escapes the folder or names a
+    directory, the base64 is invalid, or the content exceeds 10 MB. The instance does not have
+    to be running (stage files first, launch after)."""
+    n = _require("put_file", instance, up=False)
+    if encoding not in ("text", "base64"):
+        _fail("put_file", f"unknown encoding '{encoding}' — nothing was written", fix="use encoding='text' or 'base64'", instance=n)
+    root = os.path.realpath(_files_dir(n))
+    if not name or os.path.isabs(name) or name.endswith(("/", os.sep)):
+        _fail("put_file", f"bad name {name!r} — nothing was written",
+              fix="pass a relative file path inside the staging folder, e.g. 'data.csv' or 'in/logo.svg'", instance=n)
+    target = os.path.realpath(os.path.join(root, name))
+    if os.path.commonpath([root, target]) != root or target == root:
+        _fail("put_file", f"{name!r} is outside the staging folder — nothing was written",
+              fix=f"files can only be written under {root} (no '..', no symlinks out of it)", instance=n)
+    if encoding == "base64":
+        try:
+            data = base64.b64decode(content, validate=True)
+        except (binascii.Error, ValueError) as e:
+            _fail("put_file", f"invalid base64: {e} — nothing was written", fix="send standard base64 without line breaks",
+                  instance=n)
+    else:
+        data = content.encode("utf-8")
+    if len(data) > PUT_MAX:
+        _fail("put_file", f"{len(data)} bytes exceeds the {PUT_MAX} byte limit — nothing was written",
+              fix="copy large files into the staging folder on the host instead (list_files shows its path)", instance=n)
+    if os.path.isdir(target):
+        _fail("put_file", f"{name!r} is a directory — nothing was written", fix="pass a file name inside it", instance=n)
+    existed = os.path.exists(target)
+    if existed and not overwrite:
+        _fail("put_file", f"{name!r} already exists — nothing was written",
+              fix="pass overwrite=true to replace it, or pick another name (list_files shows what is there)", instance=n)
+    tmp = f"{target}.put-{os.getpid()}-{threading.get_ident()}"
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, target)       # atomic: a reader never sees a half-written file
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        _fail("put_file", f"could not write {target}: {e}", fix="check permissions and free space on the files/ folder", instance=n)
+    return _ok("put_file", n, path=target, name=os.path.relpath(target, root), bytes=len(data), overwritten=existed)
 
 
 _X11 = None
