@@ -9,6 +9,79 @@ reported to MCP clients during the initialize handshake.
 ## [Unreleased]
 
 ### Added
+- **Five tools** (23 → 28): `find_elements(query, type)` (parse + filter in one
+  call, ids ready for `click_element`), `wait_for_text(text, appear)` (OCR/parse
+  polling with an honest `timed_out`), `browser(action=info|navigate|text|eval)`
+  (CDP: URL/tabs, navigation that waits for load, rendered page text, JS
+  values), `manage_window(action, window_id)` (activate/close/minimize/
+  maximize/restore/move/resize), `start_app(command)` (another app on an
+  existing instance).
+- `click(count, modifiers)` — double/triple and ctrl/shift/alt-clicks (keys
+  released whatever happens); `click_element(modifiers)`;
+  `type_text(clear, submit)`; `scroll(x, y, axis)` with `applied`/`clamped`
+  reported (the 100-notch cap used to be silent); `window_info` reports the
+  pointer position and unnamed windows; `list_instances` rows carry the active
+  window `title`; `close_instance(all_launched=true)`; `parse_screen` results
+  carry `detector` and `fallback_reason`.
+- A Claude Code **skill** (`skills/glovebox/SKILL.md`, `./install.sh skill`)
+  that teaches an agent the observe → act → verify loop and the gotchas.
+- `_paths.py`: one 0700, ownership-checked per-user temp dir for frames and
+  logs (it used to be created with the default mode and no check).
+
+### Changed
+- **The host display is refused** — `instance=0` (or whatever
+  `GLOVEBOX_HOST_DISPLAY` is) used to drive the real desktop; every tool now
+  validates the instance id (1–255, not the host, display answering).
+- **A failed observation no longer fails the action** — `click(observe=
+  "parse")` whose parse errors returns `ok: true, observed: false,
+  observe_error` instead of an isError that made agents click twice.
+- **Per-instance serialization**: tools that touch one instance's cursor,
+  keyboard or clipboard run under that instance's lock (SDK 2.x overlaps
+  calls; a `mousemove` could interleave with another call's `click`).
+- `press_keys` validates every token against the X keysym table (libX11)
+  BEFORE pressing — "nothing was pressed" is now true also for `'ctrl+a Foo'`.
+- `type_text` restores the clipboard after a unicode paste also when it was
+  empty (it used to leave the typed text there, and the host bridge mirrored
+  it to the desktop), waits 0.3 s for slow readers, never fails on the
+  restore; long ASCII text scales the xdotool timeout instead of timing out
+  mid-string.
+- `launch_app` validates `size` and the command before starting a display,
+  logs Xephyr's stderr (quoted on failure, with `poll()` instead of a blind
+  10 s wait), closes the display again on any later failure, and reports a
+  failed keymap copy / bridge start in `warnings` instead of silently.
+- `drag` releases the button even when a motion step fails; `scroll` reports
+  the clamp; `clipboard(get)` caps at 100 000 characters (`truncated`) and
+  distinguishes "empty" from "xclip failed"; `list_files` fails on an
+  unreadable folder instead of returning 0 entries.
+- `list_instances` forgets instances whose window was closed by hand (their
+  number is reused; stale `up: false` rows are gone) and probes :1–:24.
+- The vision backend is re-resolved every 20 s (installing OmniParser or
+  freeing the GPU used to need a server restart); `auto` no longer picks
+  `local` when the GPU lacks free memory to load the models (unless the
+  shared service already holds them).
+- Chromium is no longer started with `--remote-allow-origins=*` (any local
+  page could drive the browser); the CDP client never sent an Origin header
+  anyway.
+- Missing binaries (xdotool, xdpyinfo, xclip, wmctrl) are structured errors
+  with the package named, not raw exceptions; a recorded pid is only killed
+  while it still is that process.
+- The vision service: frame limits (64 KiB header, 64 MiB payload), one
+  thread cap, in-flight requests counted from accept (an upload in progress
+  can no longer be cut off by the idle exit), shutdown drains running parses,
+  SIGTERM handled, accept errors survived, only its own socket file removed
+  (a newer service's was deleted before), status polls no longer reset the
+  idle clock (the GPU was pinned forever on a monitored machine), a
+  reachable-but-slow service is reported as busy instead of loading a second
+  model copy in the server, malformed replies are errors, annotated frames
+  are deleted after they are sent, the start-lock is per socket path.
+- ScreenParser merge: a container of a different class keeps its child (a
+  Text Input no longer loses its clear icon), identical boxes tie-break by
+  confidence, degenerate boxes are dropped before captioning (a 0.4 px box
+  used to shift every following caption onto the wrong element), centres are
+  clamped into the display, `box_threshold` raises the detector floor.
+- `basic` OCR: lines are split at wide gaps (a menu bar "File   Edit   View"
+  is three targets, not one whose centre is blank), tesseract runs under a
+  30 s timeout.
 - **Optional typed detector for `local` mode** (`python vision.py
   install-screenparser`): ScreenParser (docling-project, ICML 2026, YOLO11-L,
   55 UI classes, Apache-2.0, 153 MB) replaces OmniParser's icon-only detector

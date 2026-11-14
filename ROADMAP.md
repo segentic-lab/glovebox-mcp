@@ -58,10 +58,9 @@ text mirrored both ways. Not done: images on the clipboard, the PRIMARY selectio
 
 ## 0.4.x — candidates, not yet committed
 
-- `navigate(url)` / `page_text()` over the CDP port that already exists for uploads — exact
-  browser navigation and DOM text without keystrokes or OCR. Risk: scope creep toward a browser
-  automation server (that is periscope's job); keep it to the two calls agents ask for most.
-- A `close_all` / `close_instance(all=True)` once multi-agent fleets are routinely left behind.
+- ~~`navigate(url)` / `page_text()` over CDP~~ — done as `browser(action=info|navigate|text|eval)`
+  (2026-11-14); kept to those four, periscope remains the browser-automation server.
+- ~~A `close_all`~~ — done as `close_instance(all_launched=true)` (2026-11-14).
 - `parse_screen` element *types* for `basic` (buttons vs. text) via simple geometry heuristics.
   (`local` has them since the ScreenParser detector option, 2026-11-14; `basic` still does not.)
 - Per-instance screen recording (`ffmpeg -f x11grab`) for dogfooding evidence in issues.

@@ -15,16 +15,24 @@ EXPECTED_TOOLS = {
     "launch_app", "list_instances", "close_instance", "get_screen_size", "screenshot",
     "parse_screen", "click", "drag", "double_click", "click_element", "type_text",
     "upload_file", "open_file", "list_files", "press_keys", "move_mouse", "scroll",
-    "wait_ms", "status",
+    "wait_ms", "status", "find_elements", "wait_for_text", "start_app", "browser", "manage_window",
     # 0.3.0
     "clipboard", "wait_for_stable", "window_info", "app_log",
 }
 
 
+def _vision(monkeypatch, **kw):
+    """Pin the server's (TTL-cached) vision resolution for a test."""
+    import time
+    v = {"requested": "auto", "effective": "none", "ready": True, "reason": "test", "fallback": False, **kw}
+    monkeypatch.setitem(server._VISION, "value", v)
+    monkeypatch.setitem(server._VISION, "at", time.time() + 10**6)
+
+
 def test_all_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
-    assert len(names) == 23
+    assert len(names) == 28
 
 
 def test_descriptions_are_agent_first():
@@ -85,7 +93,7 @@ def test_xdotool_calls_have_a_timeout(monkeypatch):
 
 
 def test_coordinates_outside_display_are_rejected():
-    server._GEOM[42] = (800, 600)
+    server._set_geometry(42, 800, 600)
     server._check_xy("click", 42, (0, 0), (799, 599))   # corners are fine
     for bad in ((800, 10), (10, 600), (-1, 10), (10, -1), (9999, 9999)):
         with pytest.raises(ToolError) as e:
@@ -217,8 +225,7 @@ def test_group_tesseract_lines_and_words():
 
 
 def test_vision_error_becomes_structured_failure(monkeypatch):
-    monkeypatch.setitem(server.VISION, "effective", "basic")
-    monkeypatch.setitem(server.VISION, "ready", True)
+    _vision(monkeypatch, effective="basic", ready=True)
     monkeypatch.setattr(server, "_grab_checked", lambda n, a: Image.new("RGB", (20, 20)))
     monkeypatch.setattr(server.vision, "parse_tesseract",
                         lambda img, g: (_ for _ in ()).throw(vision.VisionError("tesseract failed", "install it")))
@@ -229,9 +236,7 @@ def test_vision_error_becomes_structured_failure(monkeypatch):
 
 
 def test_requested_but_unusable_backend_fails_with_fix(monkeypatch):
-    monkeypatch.setitem(server.VISION, "effective", "local")
-    monkeypatch.setitem(server.VISION, "ready", False)
-    monkeypatch.setitem(server.VISION, "reason", "GPU too small")
+    _vision(monkeypatch, effective="local", ready=False, reason="GPU too small")
     with pytest.raises(ToolError) as e:
         server._do_parse(3)
     p = json.loads(str(e.value))
@@ -244,7 +249,7 @@ def test_parse_tesseract_keeps_the_richer_pass(monkeypatch):
     import sys, types
     calls = []
 
-    def image_to_data(im, lang, output_type):
+    def image_to_data(im, lang, output_type, **kw):
         calls.append(im.size)
         if im.size[0] > 100:   # the 2x pass finds nothing
             return {"text": [], "conf": [], "left": [], "top": [], "width": [], "height": [],

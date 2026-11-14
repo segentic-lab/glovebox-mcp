@@ -4,6 +4,7 @@
 #   ./install.sh none     lightest: no local models — the agent reads screenshots itself
 #   ./install.sh basic     Tesseract OCR (text + coords), no GPU/torch
 #   ./install.sh local     OmniParser grounding on the GPU (text+icons), heaviest/best
+#   ./install.sh skill     install the Claude Code skill (skills/glovebox/SKILL.md) into ~/.claude/skills
 #
 # System packages need sudo — the script prints the apt line for you to run.
 set -e
@@ -12,8 +13,16 @@ cd "$(dirname "$0")"
 DIR="$(pwd)"
 export PATH="$HOME/.local/bin:$PATH"
 
+if [[ "$MODE" == "skill" ]]; then
+  # Install the Claude Code skill (teaches an agent the glovebox workflow) for this user.
+  DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/glovebox"
+  mkdir -p "$DEST"
+  cp "$(dirname "$0")/skills/glovebox/SKILL.md" "$DEST/SKILL.md"
+  echo "✓ skill installed: $DEST/SKILL.md (Claude Code picks it up on the next session; /glovebox invokes it)"
+  exit 0
+fi
 if [[ "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
-  echo "Usage: ./install.sh <none|basic|local>"
+  echo "Usage: ./install.sh <none|basic|local>   (or: ./install.sh skill — install the Claude Code skill)"
   echo "  none   — no local grounding model (the agent's own vision); lightest, instant install"
   echo "  basic  — Tesseract OCR, no GPU"
   echo "  local  — OmniParser on GPU (best grounding; ~4GB downloads)"

@@ -122,7 +122,7 @@ def test_handshake_reports_project_version(x99):
             assert init.server_info.name == "glovebox"
             assert init.server_info.version == __version__
             tools = await s.list_tools()
-            assert len(tools.tools) == 23
+            assert len(tools.tools) == 28
     asyncio.run(run())
 
 
@@ -508,8 +508,9 @@ def test_concurrent_calls_overlap_and_launches_do_not_collide(x99):
             assert payload(a)["waited_ms"] == 1500 and payload(b)["waited_ms"] == 1500
             assert elapsed < 2.6, f"calls were serialized ({elapsed:.1f}s) — 2.x should overlap them"
 
-            r1, r2 = await asyncio.gather(s.call_tool("get_screen_size", {"instance": DISP}),
-                                          s.call_tool("window_info", {"instance": DISP}))
+            # :99 is the HOST display in this session, so it must not be driven; overlap two
+            # read-only calls instead
+            r1, r2 = await asyncio.gather(s.call_tool("status", {}), s.call_tool("list_instances", {}))
             assert not r1.is_error and not r2.is_error
 
             if not (shutil.which("Xephyr") and HAS_XMESSAGE):
@@ -523,4 +524,95 @@ def test_concurrent_calls_overlap_and_launches_do_not_collide(x99):
             for n in (p1["instance"], p2["instance"]):
                 r = await s.call_tool("close_instance", {"instance": n})
                 assert not r.is_error, payload(r)
+    asyncio.run(run())
+
+
+def test_hardening_and_new_tools(x99, xmessage_window):
+    """The review round: host display refused, scroll clamp reported, pre-validated keys, typed
+    click options, start_app, manage_window, find_elements/wait_for_text honesty in 'none' mode,
+    browser() without a browser, close_instance(all_launched) with nothing launched."""
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": ":0"}) as (s, _):
+            # instance 0 = the host display: refused before anything happens
+            for tool, args in (("screenshot", {}), ("click", {"x": 1, "y": 1}), ("press_keys", {"keys": "Return"})):
+                r = await s.call_tool(tool, {**args, "instance": 0})
+                assert r.is_error and "range" in payload(r)["error"] or "host" in payload(r)["error"], tool
+
+            r = await s.call_tool("scroll", {"amount": 500, "instance": DISP, "x": 50, "y": 50})
+            p = payload(r)
+            assert not r.is_error and p["clamped"] is True and p["applied"] == 100
+            r = await s.call_tool("scroll", {"amount": -2, "instance": DISP, "axis": "sideways"})
+            assert r.is_error and "axis" in payload(r)["error"]
+            r = await s.call_tool("scroll", {"amount": 2, "instance": DISP, "axis": "horizontal"})
+            assert not r.is_error and payload(r)["axis"] == "horizontal"
+
+            # an invalid token anywhere in a sequence: nothing pressed, named
+            r = await s.call_tool("press_keys", {"keys": "ctrl+a NoSuchKeyXYZ", "instance": DISP})
+            assert r.is_error and "nothing was pressed" in payload(r)["error"]
+            r = await s.call_tool("press_keys", {"keys": "ctrl+", "instance": DISP})
+            assert r.is_error
+
+            r = await s.call_tool("click", {"x": 20, "y": 20, "instance": DISP, "count": 2, "modifiers": "ctrl"})
+            p = payload(r)
+            assert not r.is_error and p["count"] == 2 and p["modifiers"] == "ctrl"
+            if HAS_WM:
+                assert pointer() == (20, 20)
+            r = await s.call_tool("click", {"x": 20, "y": 20, "instance": DISP, "modifiers": "hyperdrive"})
+            assert r.is_error and "nothing was done" in payload(r)["error"]
+
+            r = await s.call_tool("type_text", {"text": "abc", "instance": DISP, "clear": True, "submit": True})
+            p = payload(r)
+            assert not r.is_error and p["cleared"] is True and p["submitted"] is True
+
+            # start_app: a second xmessage on the same display, visible in window_info
+            r = await s.call_tool("window_info", {"instance": DISP})
+            before = payload(r)["count"]
+            assert payload(r)["cursor"] is not None
+            r = await s.call_tool("start_app", {"command": "xmessage -center second-window", "instance": DISP})
+            assert not r.is_error and payload(r)["pid"] > 0
+            for _ in range(20):
+                await asyncio.sleep(0.25)
+                r = await s.call_tool("window_info", {"instance": DISP})
+                if payload(r)["count"] > before:
+                    break
+            assert payload(r)["count"] > before
+            r = await s.call_tool("start_app", {"command": "no-such-binary-abc", "instance": DISP})
+            assert r.is_error and "not found" in payload(r)["error"]
+            r = await s.call_tool("start_app", {"command": "xmessage 'unbalanced", "instance": DISP})
+            assert r.is_error and "nothing was started" in payload(r)["error"]
+
+            # manage_window on the active window
+            r = await s.call_tool("window_info", {"instance": DISP})
+            active = payload(r)["active"]
+            if active and HAS_WM:
+                r = await s.call_tool("manage_window", {"action": "move", "instance": DISP, "window_id": active["id"],
+                                                        "x": 30, "y": 40})
+                assert not r.is_error and payload(r)["window"] == active["id"]
+                r = await s.call_tool("manage_window", {"action": "resize", "instance": DISP, "window_id": active["id"],
+                                                        "width": 300, "height": 200, "observe": "screenshot"})
+                assert not r.is_error and payload(r)["observed"] == "screenshot"
+                r = await s.call_tool("manage_window", {"action": "activate", "instance": DISP})
+                assert not r.is_error
+            r = await s.call_tool("manage_window", {"action": "resize", "instance": DISP, "window_id": 1})
+            assert r.is_error and "unknown window" in payload(r)["error"]
+            r = await s.call_tool("manage_window", {"action": "explode", "instance": DISP})
+            assert r.is_error
+
+            # vision 'none': find/wait fail with the fix instead of pretending
+            r = await s.call_tool("find_elements", {"query": "ok", "instance": DISP})
+            assert r.is_error and "screenshot" in payload(r)["fix"]
+            r = await s.call_tool("wait_for_text", {"text": "ok", "instance": DISP, "timeout_ms": 500})
+            assert r.is_error and "wait_for_stable" in payload(r)["fix"]
+
+            r = await s.call_tool("browser", {"action": "info", "instance": DISP})
+            assert r.is_error and "Chromium" in payload(r)["fix"]
+            r = await s.call_tool("browser", {"action": "navigate", "url": "not a url", "instance": DISP})
+            assert r.is_error and "nothing was navigated" in payload(r)["error"]
+
+            r = await s.call_tool("close_instance", {"all_launched": True})
+            assert not r.is_error and payload(r)["closed"] == []
+
+            r = await s.call_tool("list_instances", {})
+            rows = payload(r)["instances"]
+            assert all("title" in row and "clipboard_sync" in row for row in rows)
     asyncio.run(run())

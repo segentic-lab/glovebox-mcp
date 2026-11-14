@@ -64,12 +64,17 @@ in one call.
 | Orient: version, vision mode + why, GPU, instances, deps | `status()` |
 | See the screen / zoom / cheaper shot | `screenshot(instance)` · `screenshot(instance, region="x,y,w,h")` · `screenshot(instance, scale=0.5, format="jpeg")` |
 | List elements + coords | `parse_screen(instance)` → `click_element(id, instance)` |
-| Click a known pixel | `click(x, y, instance, observe="screenshot")` |
-| Type into the focused field | `type_text("…", instance)` — unicode-safe automatically |
+| Find one element by its text | `find_elements("Sign in", instance, type="button")` → `click_element(id)` — no 300-element scan |
+| Wait for a page/dialog by its text | `wait_for_text("Welcome", instance)` → `satisfied` / `timed_out` (honest) |
+| Click a known pixel | `click(x, y, instance, observe="screenshot")` — `count=2` double, `modifiers="ctrl"` ctrl-click |
+| Type into the focused field | `type_text("…", instance)` — unicode-safe automatically; `clear=True` replaces, `submit=True` adds Return |
+| Browser: URL, navigate, page text, JS | `browser(action="info"/"navigate"/"text"/"eval", instance, url=…, js=…)` — exact, no OCR |
+| Switch windows / dialogs, resize, close | `window_info(instance)` → `manage_window("activate"/"close"/"resize", instance, window_id)` |
+| Second app on the same instance | `start_app("gimp", instance)` |
 | Keys / shortcuts / sequences | `press_keys("Return" / "ctrl+a" / "ctrl+a Delete", instance)` |
 | Read exact text out of an app | select → `press_keys("ctrl+c")` → `clipboard(action="get", instance)` |
 | Put text on the clipboard | `clipboard(action="set", text="…", instance)` → `press_keys("ctrl+v")` |
-| Scroll | `scroll(amount, instance)` (positive = up, negative = down) |
+| Scroll | `scroll(amount, instance, x=…, y=…)` (positive = up, negative = down; `axis="horizontal"` sideways; max 100, `clamped` flagged) |
 | Drag / draw / select / slider | `drag(x1, y1, x2, y2, instance, steps=10)` |
 | Double-click / hover (menus, tooltips) | `double_click(x, y, instance)` · `move_mouse(x, y, instance)` then `screenshot` |
 | Upload a file to a web form | `upload_file("/path", instance)` — see rules below |
@@ -79,6 +84,11 @@ in one call.
 | New parallel window | `launch_app("chromium")` → use the returned instance id |
 
 ## Rules that will bite you if ignored
+
+- **An action is never un-done by a failed observation** — `click(observe="parse")` whose parse
+  fails returns `ok: true, observed: false, observe_error: …`. The click happened: do NOT repeat
+  it; screenshot instead.
+- **`instance=0` is the host desktop and is refused** — only ids from `launch_app`/`list_instances`.
 
 - **Typing** — `type_text` already handles unicode (č/š/ž…) by pasting non-ASCII via the clipboard
   (and puts the previous clipboard text back afterwards). Just call it; don't type special

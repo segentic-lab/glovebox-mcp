@@ -69,6 +69,14 @@ Your choice is written to `.vision-mode` (override per run with the `GLOVEBOX_VI
 Without either, the server runs in **`auto`** and picks the best backend that is actually usable.
 `python vision.py check` prints the same diagnosis `status()` returns (GPU, weights, tesseract).
 
+### Claude Code skill
+
+`./install.sh skill` copies `skills/glovebox/SKILL.md` into `~/.claude/skills/glovebox/` — a
+skill that teaches Claude Code the observe → act → verify loop, grounding per vision mode, the
+upload and navigation gotchas, and when to stop. Claude Code loads it automatically when an agent
+is asked to drive a GUI app (or explicitly with `/glovebox`). AGENTS.md remains the long form for
+any other agent/harness.
+
 ### Works with any MCP client / harness
 
 Claude Code, Cursor, Codex, or your own agent — it's a standard MCP server, not tied to any one host.
@@ -100,25 +108,30 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 > **Driving it with an AI agent?** Paste [`AGENTS.md`](AGENTS.md) into the agent's system prompt — it
 > teaches the observe → act → verify loop, grounding, the upload/unicode gotchas, and when to stop.
 
-## Tools (23)
+## Tools (28)
 
 | Tool | What |
 |---|---|
 | `status()` | Server + sandbox status in one read-only call: version, the vision diagnosis (requested vs. effective backend and *why*, GPU name/VRAM, OmniParser code/weights, tesseract languages), live instances, and which system deps are present. Run it first — and paste it into bug reports. |
 | `screenshot(instance, region?, scale?, format?)` | `[json, image]`. `region="x,y,w,h"` zooms into a rectangle, `scale=0.5` shrinks, `format="jpeg"` compresses — cut payload or read small text. |
 | `parse_screen(instance, granularity?)` | Vision grounding → JSON of detected elements (id, type, label, interactive, pixel-center; capped at 300 per call, flagged via `"truncated"`) + a numbered Set-of-Mark image. `basic` merges OCR words into **lines** (`"Sign in"` = one target; `granularity="word"` for single words). |
-| `click_element(id)` | Click an element from the last `parse_screen` (no coordinate guessing). |
-| `click(x,y)` · `double_click` · `move_mouse` · `scroll` · `drag(…, steps?)` | Pointer ops. Coordinates outside the display are **rejected** (xdotool would silently clamp them). `drag` emits intermediate motion events so canvases and sliders register it. |
-| `type_text(text)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps). |
-| `press_keys("ctrl+a" / "Return" / "ctrl+a Delete")` | Keys, combos, and space-separated **sequences** (xdotool syntax). Invalid names error — nothing is pressed. |
+| `find_elements(query, type?)` | Parse + filter in one call: the elements whose label contains `query` (and optionally of one `type`), ids ready for `click_element`. `count: 0` is an honest "not on screen". |
+| `wait_for_text(text, timeout_ms?, appear?)` | Poll OCR/parse until a text appears (or disappears) — the honest replacement for "sleep and hope" after navigation; `timed_out` is reported, never hidden. |
+| `click_element(id, modifiers?)` | Click an element from the last `parse_screen`/`find_elements` (no coordinate guessing). |
+| `click(x,y, count?, modifiers?)` · `double_click` · `move_mouse` · `scroll(amount, x?, y?, axis?)` · `drag(…, steps?)` | Pointer ops. Coordinates outside the display are **rejected** (xdotool would silently clamp them). `count=2/3` double/triple-clicks, `modifiers="ctrl+shift"` holds keys (released whatever happens). `scroll` can move to `x,y` first, scroll `horizontal`, and reports `applied`/`clamped` (max 100 notches). `drag` emits intermediate motion events so canvases and sliders register it, and releases the button even if a step fails. |
+| `type_text(text, clear?, submit?)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps; the clipboard is put back afterwards). `clear=true` replaces the field's content, `submit=true` presses Return — one call to fill and submit. |
+| `press_keys("ctrl+a" / "Return" / "ctrl+a Delete")` | Keys, combos, and space-separated **sequences** (xdotool syntax). Every token is validated against the X keysym table **before** anything is pressed — an invalid name anywhere in a sequence errors with nothing pressed. |
+| `browser(action="info"\|"navigate"\|"text"\|"eval")` | The instance's Chromium over CDP: current URL/title and tabs, exact navigation (waits for load), the rendered page text without OCR, or a JavaScript expression's value. |
+| `manage_window(action, window_id?)` | activate / close / minimize / maximize / restore / move / resize a window (ids from `window_info`; 0 = the active one) — switch between an app's windows and dialogs. |
+| `start_app(command)` | Start another app on an existing instance (same window/cursor) — a second tool, or a restart. |
 | `clipboard(action="get"\|"set", text?)` | Read the instance's clipboard (select + `ctrl+c`, then read **exact** text — no OCR) or set it (then `ctrl+v`). Per-instance; text is mirrored to/from the **host** clipboard by the per-instance bridge, so a person can copy-paste across. |
 | `wait_for_stable(instance, timeout_ms?, threshold?)` | Wait until the screen **stops changing** (page loaded, app drew) instead of guessing a delay. Reports `stable`/`timed_out` honestly. |
-| `window_info(instance)` | Active window title + geometry and the visible windows — confirm navigation or that an app opened, without an image. |
+| `window_info(instance)` | Active window title + geometry, the visible windows (ids for `manage_window`) and the pointer position — confirm navigation or that an app opened, without an image. |
 | `upload_file(filepath, selector?, page_url_contains?)` | Attach a local file to a page's `<input type=file>` via the **Chrome DevTools Protocol**. The nested X11 file picker is invisible to automation **and hangs the renderer**, so use this for all uploads — never click an upload button expecting a dialog. Works on Chromium-family browsers started by `launch_app`/`start-display.sh` (per-instance `--remote-debugging-port`, `9222+N`). **Browser file inputs only** — for native apps see `open_file`. |
 | `open_file(filepath, app?)` | Open a local file in a **native** app on the instance's display (e.g. `app="gimp"`) or via `xdg-open`. Fails honestly if the handler exits immediately (no app registered for that type). |
 | `list_files()` | The instance's staging folder `files/<N>/` + entries with size, mtime and a `partial` flag for in-progress downloads. |
 | `app_log(instance, lines?)` | Tail of the launched app's stderr — read it when an app crashed or drew nothing. |
-| `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). |
+| `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n \| all_launched=true)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). `list_instances` shows each window's `title`; instances closed by hand disappear and their number is reused. |
 | `wait_ms(ms)` · `get_screen_size()` | Timing / sandbox size + effective vision backend. |
 
 Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** (see below).
@@ -137,7 +150,15 @@ instance that isn't running, an app that exits on launch, or non-ASCII typing wi
 error instead of pretending success. Clamped waits are flagged (`clamped` / `settle_clamped`).
 Image-returning calls (`screenshot()`, `observe="screenshot"|"parse"`) return `[json, image]`.
 No subprocess can hang a call: xdotool/xdpyinfo/xclip run under timeouts and a frozen display is
-reported as such.
+reported as such; a missing binary is a structured error, never a raw exception.
+
+Two more rules of the contract: **an action that happened is never reported as failed** because the
+observation after it failed (`click(observe="parse")` whose parse hits a GPU error returns
+`ok: true, observed: false, observe_error: …` — the agent must not click again), and **the host
+display is never driven**: `instance=0` (or whatever `GLOVEBOX_HOST_DISPLAY` is) is refused by every
+tool. Calls that touch one instance's cursor, keyboard or clipboard are serialized per instance, so
+two overlapping calls from one agent cannot interleave a `mousemove` with another call's `click`;
+different instances run in parallel.
 
 ### Vision backend (selectable, self-diagnosing)
 
@@ -289,9 +310,11 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 
 ## Files
 
-- `server.py` — the MCP server (all 23 tools).
+- `server.py` — the MCP server (all 28 tools).
 - `vision.py` — vision backends: selection rules, GPU preflight, tesseract grouping, OmniParser lifecycle (`check` / `install-omniparser` CLI).
 - `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
+- `_paths.py` — shared helpers: the 0700 per-user temp dir, display naming, the liveness probe.
+- `skills/glovebox/SKILL.md` — a Claude Code skill that teaches an agent the workflow (`./install.sh skill` installs it).
 - `host_bridge.py` — per-instance host bridge: host keymap copy (AltGr fix) + clipboard mirroring (`keymap` / `serve` / `spawn` / `status` CLI).
 - `install.sh` — mode-aware installer (`none` / `basic` / `local`).
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
