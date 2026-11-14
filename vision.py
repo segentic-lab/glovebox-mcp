@@ -17,6 +17,7 @@ cheap nvidia-smi check is what status() reports).
 CLI (used by install.sh, also handy by hand):
     python vision.py check              # JSON: requested/effective backend, GPU, deps, reasons
     python vision.py install-omniparser # clone OmniParser + download the v2 weights + patch
+    python vision.py install-screenparser # optional typed detector inside the local backend (GLOVEBOX_DETECTOR)
 """
 import importlib.util
 import json
@@ -56,6 +57,129 @@ class VisionError(Exception):
 
 
 # ---------- requested mode ----------
+# ---------- detector choice inside the local backend ----------
+# OmniParser's own detector (icon_detect, YOLOv8) finds "interactable icons" and nothing else: every
+# box it emits is type "icon". ScreenParser (docling-project, ICML 2026) is a YOLO11-L trained on
+# 1.45M screenshots with 55 element classes; swapped into the same pipeline (OCR + Florence-2
+# captions) it yields typed elements (button/link/tab/input/checkbox/...) and misses fewer targets
+# (the paper: ScreenSpot action accuracy 77.8 -> 80.1 with a fixed Qwen3-VL-8B agent). Apache-2.0,
+# 153 MB. Opt in by installing it: `python vision.py install-screenparser`; GLOVEBOX_DETECTOR forces.
+SCREENPARSER_HF = "docling-project/ScreenParser"
+SCREENPARSER_FILE = "best.pt"
+SCREENPARSER_WEIGHTS = os.path.join(OMNI_WEIGHTS, "screenparser", SCREENPARSER_FILE)
+SCREENPARSER_IMGSZ = 1280   # the model card's inference settings
+SCREENPARSER_CONF = 0.10
+SCREENPARSER_IOU = 0.10
+DETECTORS = ("auto", "omniparser", "screenparser")
+
+# ScreenParser class -> glovebox element type. Classes NOT listed are layout containers (Window,
+# Screen, Side Bar, Toolbar, Navigation Bar, Tab Bar, Status Bar, Table, List, Menu, Scroll,
+# Carousel, Column/Browser, Alert, Notification, Tooltip, Video, Chart, Calendar, Breadcrumb,
+# Pagination, Bottom navigation, Page control, Search Bar, ContextMenu/DockMenu/EditMenu/PopUp Menu):
+# a container box would swallow every OCR line inside it into one element, so they are dropped.
+SP_TYPES = {
+    "Button": "button", "Utility Button": "button", "Link": "link", "Tab": "tab",
+    "Text Input": "input", "Search Field": "input", "Checkbox": "checkbox", "Radiobox": "radio",
+    "Switch": "switch", "Toggles": "switch", "Select": "select", "Picker": "select",
+    "Date-Time picker": "select", "Slider": "slider", "Steppers": "stepper",
+    "Rating Indicator": "rating", "App Icon": "icon", "File Icon": "icon",
+    "Image": "image", "Avatar": "image", "Logo": "image", "List Item": "item",
+    "Badge": "indicator", "Progress bar": "indicator",
+    "Text": "text", "Heading": "text", "Code snippet": "text",
+}
+SP_NON_INTERACTIVE = {"image", "indicator", "text"}
+
+
+def requested_detector() -> str:
+    d = os.environ.get("GLOVEBOX_DETECTOR", "auto").strip().lower() or "auto"
+    return d if d in DETECTORS else "auto"
+
+
+def detector_info() -> dict:
+    """Which detector the local backend uses. Returns {requested, effective, screenparser_weights,
+    reason}. auto = ScreenParser when its weights are installed, else OmniParser's own detector.
+    An explicit 'screenparser' without weights is reported here and fails parse_screen honestly."""
+    req = requested_detector()
+    have = os.path.isfile(SCREENPARSER_WEIGHTS)
+    if req == "screenparser" and not have:
+        eff, reason = "screenparser", f"ScreenParser weights missing at {SCREENPARSER_WEIGHTS} (run `python vision.py install-screenparser`)"
+    elif req == "omniparser" or (req == "auto" and not have):
+        eff, reason = "omniparser", "OmniParser icon detector" + ("" if req == "omniparser" else " (install ScreenParser for typed elements: `python vision.py install-screenparser`)")
+    else:
+        eff, reason = "screenparser", "ScreenParser (55 element classes)" + (" — auto-selected because its weights are installed" if req == "auto" else "")
+    return {"requested": req, "effective": eff, "screenparser_weights": have, "reason": reason}
+
+
+def _box_area(b):
+    return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def _inter(a, b):
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def _overlap(a, b) -> float:
+    """OmniParser's overlap measure: max(IoU, fraction of a covered, fraction of b covered)."""
+    i = _inter(a, b)
+    aa, ab = _box_area(a), _box_area(b)
+    if aa <= 0 or ab <= 0:
+        return 0.0
+    return max(i / (aa + ab - i + 1e-6), i / aa, i / ab)
+
+
+def _inside(a, b) -> bool:
+    aa = _box_area(a)
+    return aa > 0 and _inter(a, b) / aa > 0.80
+
+
+def merge_detections(dets: list, ocr: list, iou_threshold: float = 0.7) -> list:
+    """Combine ScreenParser detections with OCR lines into glovebox elements (no GPU; pure).
+
+    dets: [{"bbox": [x1,y1,x2,y2] in 0..1, "cls": ScreenParser class, "conf": float}]
+    ocr:  [{"bbox": [...], "content": str}]
+    Rules (OmniParser's merge, made class-aware):
+      * container classes are dropped (see SP_TYPES);
+      * of two detections overlapping > iou_threshold the smaller survives;
+      * a Text/Heading detection that contains OCR lines is dropped — the lines are the better
+        targets; one with no OCR inside stays (type "text", captioned later);
+      * any other detection absorbs the OCR lines inside it as its label (a button gets its
+        caption text); a detection that lies inside an OCR line is dropped (OmniParser's rule);
+      * remaining OCR lines become type "text".
+    Returns elements [{"type", "bbox", "content", "interactive", "class", "conf"}] with the
+    caption-needing ones (content None) LAST, as OmniParser's captioner expects."""
+    cand = [d for d in dets if d["cls"] in SP_TYPES and _box_area(d["bbox"]) > 0]
+    kept = []
+    for i, d in enumerate(cand):
+        if any(j != i and _overlap(d["bbox"], e["bbox"]) > iou_threshold and _box_area(d["bbox"]) > _box_area(e["bbox"])
+               for j, e in enumerate(cand)):
+            continue
+        kept.append(d)
+    kept.sort(key=lambda d: _box_area(d["bbox"]))          # small boxes claim their text first
+    pool = [dict(o) for o in ocr if _box_area(o["bbox"]) > 0]
+    out = []
+    for d in kept:
+        typ = SP_TYPES[d["cls"]]
+        inside = [o for o in pool if _inside(o["bbox"], d["bbox"])]
+        if typ == "text":
+            if inside:
+                continue
+            out.append({"type": "text", "bbox": d["bbox"], "content": None, "interactive": False,
+                        "class": d["cls"], "conf": round(d["conf"], 3)})
+            continue
+        if not inside and any(_inside(d["bbox"], o["bbox"]) for o in pool):
+            continue
+        for o in inside:
+            pool.remove(o)
+        label = " ".join(o["content"] for o in inside).strip() or None
+        out.append({"type": typ, "bbox": d["bbox"], "content": label, "interactive": typ not in SP_NON_INTERACTIVE,
+                    "class": d["cls"], "conf": round(d["conf"], 3)})
+    for o in pool:
+        out.append({"type": "text", "bbox": o["bbox"], "content": o["content"], "interactive": False,
+                    "class": "OCR", "conf": None})
+    out.sort(key=lambda e: e["content"] is None)
+    return out
+
+
 def requested_mode() -> str:
     """GLOVEBOX_VISION env, else the .vision-mode file written by install.sh, else 'auto'."""
     m = os.environ.get("GLOVEBOX_VISION")
@@ -162,7 +286,8 @@ def omniparser_info(gpu: dict = None) -> dict:
     else:
         reason = "ok" if gpu["note"] == "ok" else gpu["note"]
     ready = code and weights and torch_ok and gpu["present"] and gpu["enough"]
-    return {"code": code, "weights": weights, "torch": torch_ok, "gpu": gpu, "ready": ready, "reason": reason}
+    return {"code": code, "weights": weights, "torch": torch_ok, "gpu": gpu, "ready": ready, "reason": reason,
+            "detector": detector_info()}
 
 
 def resolve(requested: str = None, omni: dict = None, tess: dict = None) -> dict:
@@ -284,6 +409,7 @@ class OmniParser:
         self._cap = None
         self._lock = threading.Lock()
         self.load_seconds = None
+        self.detector = detector_info()["effective"]   # omniparser | screenparser (fixed at load)
 
     @property
     def loaded(self) -> bool:
@@ -320,8 +446,16 @@ class OmniParser:
                 raise VisionError("torch cannot see CUDA (driver/toolkit mismatch?) — OmniParser needs the GPU",
                                   "fix the NVIDIA driver (`nvidia-smi` works but torch.cuda.is_available() is False), "
                                   "or set GLOVEBOX_VISION=basic")
+            det = detector_info()
+            self.detector = det["effective"]
+            if self.detector == "screenparser" and not det["screenparser_weights"]:
+                raise VisionError(det["reason"], "run `python vision.py install-screenparser`, or unset GLOVEBOX_DETECTOR")
             try:
-                self._yolo = get_yolo_model(OMNI_DETECT)
+                if self.detector == "screenparser":
+                    from ultralytics import YOLO
+                    self._yolo = YOLO(SCREENPARSER_WEIGHTS)
+                else:
+                    self._yolo = get_yolo_model(OMNI_DETECT)
                 self._cap = get_caption_model_processor(model_name="florence2", model_name_or_path=OMNI_CAPTION)
             except Exception as e:
                 self._yolo = self._cap = None
@@ -343,10 +477,14 @@ class OmniParser:
             (ocr_text, ocr_bbox), _ = check_ocr_box(frame, display_img=False, output_bb_format="xyxy",
                                                     easyocr_args={"paragraph": False, "text_threshold": 0.8},
                                                     use_paddleocr=False)
+            if self.detector == "screenparser":
+                return self._parse_screenparser(img, ocr_text, ocr_bbox, annotated_path)
             b64, _lc, parsed = get_som_labeled_img(frame, self._yolo, BOX_TRESHOLD=box_threshold,
                                                    output_coord_in_ratio=True, ocr_bbox=ocr_bbox,
                                                    caption_model_processor=self._cap, ocr_text=ocr_text,
                                                    iou_threshold=0.7, imgsz=640)
+        except VisionError:
+            raise
         except Exception as e:
             if "out of memory" in str(e).lower():
                 raise VisionError(f"GPU out of memory during parse: {str(e)[:160]}",
@@ -365,6 +503,45 @@ class OmniParser:
                           "interactive": e.get("interactivity"),
                           "center": [int((bb[0] + bb[2]) / 2 * W), int((bb[1] + bb[3]) / 2 * H)]})
         return elems
+
+    def _parse_screenparser(self, img, ocr_text, ocr_bbox, annotated_path):
+        """ScreenParser detector + OmniParser's OCR/captioner/annotator. Same element shape as the
+        default path plus "class" (the ScreenParser class) and typed "type" values."""
+        import numpy as np
+        import torch
+        from torchvision.ops import box_convert
+        from util.utils import annotate, get_parsed_content_icon
+        W, H = img.width, img.height
+        res = self._yolo.predict(source=img, conf=SCREENPARSER_CONF, iou=SCREENPARSER_IOU,
+                                 imgsz=SCREENPARSER_IMGSZ, verbose=False)[0]
+        dets = [{"bbox": [x1 / W, y1 / H, x2 / W, y2 / H], "cls": self._yolo.names[int(c)], "conf": float(p)}
+                for (x1, y1, x2, y2), c, p in zip(res.boxes.xyxy.tolist(), res.boxes.cls.tolist(), res.boxes.conf.tolist())]
+        ocr = [{"bbox": [b[0] / W, b[1] / H, b[2] / W, b[3] / H], "content": t}
+               for b, t in zip(ocr_bbox or [], ocr_text or [])]
+        elems = merge_detections(dets, ocr)
+        start = next((i for i, e in enumerate(elems) if e["content"] is None), -1)
+        np_img = np.asarray(img.convert("RGB"))
+        boxes = torch.tensor([e["bbox"] for e in elems], dtype=torch.float32) if elems else torch.zeros((0, 4))
+        if start >= 0:
+            # captions for boxes without text (icons, images, inputs): OmniParser's Florence-2 call;
+            # it crops boxes[start:] — when start == 0 it falls back to all boxes, which is right
+            caps = get_parsed_content_icon(boxes, start, np_img, self._cap)
+            for e in elems[start:]:
+                e["content"] = caps.pop(0) if caps else None
+        if elems:
+            ann, _ = annotate(np_img, box_convert(boxes, "xyxy", "cxcywh"), torch.ones(len(elems)),
+                              list(range(len(elems))), text_scale=0.4, text_padding=5)
+            from PIL import Image as _I
+            _I.fromarray(ann).save(annotated_path)
+        else:
+            img.save(annotated_path)
+        out = []
+        for e in elems:
+            bb = e["bbox"]
+            out.append({"id": len(out), "type": e["type"], "label": e["content"], "interactive": e["interactive"],
+                        "center": [int((bb[0] + bb[2]) / 2 * W), int((bb[1] + bb[3]) / 2 * H)],
+                        "class": e["class"]})
+        return out
 
 
 # ---------- install helper (moved out of install.sh so the server owns the OmniParser lifecycle) ----------
@@ -411,6 +588,24 @@ def install_omniparser(log=print) -> str:
     return OMNI_DIR
 
 
+def install_screenparser(log=print) -> str:
+    """Download the ScreenParser detector weights (153 MB, Apache-2.0) next to OmniParser's.
+    Idempotent. OmniParser (the OCR + captioner) must be installed as well."""
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        raise SystemExit("huggingface_hub is not installed — run ./install.sh local first")
+    d = os.path.dirname(SCREENPARSER_WEIGHTS)
+    os.makedirs(d, exist_ok=True)
+    log(f"▶ weights: {SCREENPARSER_HF}/{SCREENPARSER_FILE} → {d}")
+    hf_hub_download(repo_id=SCREENPARSER_HF, filename=SCREENPARSER_FILE, local_dir=d)
+    info = detector_info()
+    log(f"✓ ScreenParser installed — detector now: {info['effective']} ({info['reason']})")
+    if not omniparser_info()["ready"]:
+        log("⚠ OmniParser itself is not ready; ScreenParser runs inside its pipeline — run `python vision.py install-omniparser`")
+    return SCREENPARSER_WEIGHTS
+
+
 def check() -> dict:
     gpu = gpu_info()
     omni = omniparser_info(gpu)
@@ -424,6 +619,8 @@ if __name__ == "__main__":
         print(json.dumps(check(), indent=2))
     elif cmd == "install-omniparser":
         install_omniparser()
+    elif cmd == "install-screenparser":
+        install_screenparser()
     else:
         print(__doc__)
         sys.exit(2)

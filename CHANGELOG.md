@@ -8,6 +8,21 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+### Added
+- **Optional typed detector for `local` mode** (`python vision.py
+  install-screenparser`): ScreenParser (docling-project, ICML 2026, YOLO11-L,
+  55 UI classes, Apache-2.0, 153 MB) replaces OmniParser's icon-only detector
+  inside the same pipeline (easyocr text, Florence-2 captions). `parse_screen`
+  elements then carry a real `type` (button, link, tab, input, checkbox,
+  radio, switch, select, slider, image, icon, …) and the raw `class`; buttons
+  and tabs get their visible text as `label`. Auto-selected once installed,
+  `GLOVEBOX_DETECTOR` forces either; `status()` reports
+  `vision.omniparser.detector`; the vision service reports which one it
+  loaded. Layout containers (window, toolbar, table, …) are dropped before the
+  merge so they cannot swallow the text inside them. Measured on the same
+  1440x900 page: 110 typed elements vs. 93 untyped, 1.7 s per parse either
+  way. Merge rules are unit-tested without a GPU.
+
 ### Fixed
 - `local` mode failed on a fresh install with `OmniParser import failed: No
   module named 'openai'`: OmniParser's `util/utils.py` imports the OpenAI SDK

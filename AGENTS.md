@@ -46,7 +46,9 @@ in one call.
 
 `status()` / `get_screen_size(instance)` report the effective `"vision"` backend.
 
-- **`local` / `basic`** — call `parse_screen(instance)` to get numbered `elements`, then
+- **`local` / `basic`** — call `parse_screen(instance)` to get numbered `elements` (in `local` with the
+  ScreenParser detector each has a real `type` — button, link, tab, input, checkbox, … — and its
+  visible text as `label`; prefer those over guessing from a screenshot), then
   **`click_element(id, instance)`**. Do NOT guess coordinates when you have a parse. In `basic`,
   elements are OCR **lines** ("Sign in" is one target); icons without text are invisible to it.
 - **`none`** — no local grounding: take a `screenshot`, reason about the pixel coordinates yourself,

@@ -148,7 +148,7 @@ reported as such.
 | `auto` | the best **ready** backend below (`local` → `basic` → `none`); `status()` says which and why | — | default |
 | `none` | disabled (returns a note) — use `screenshot()` + reason, `clipboard()` for exact text | nothing (mcp, mss, xdotool) | lightest; let the agent's own vision do grounding |
 | `basic` | Tesseract OCR → text **lines** + coords (+ confidence) | `tesseract-ocr` + `pytesseract` | no GPU; text-only grounding |
-| `local` | OmniParser → text **+ icons** + coords | torch + CUDA + OmniParser weights + NVIDIA GPU ≥ 6 GB | best grounding |
+| `local` | OmniParser → text **+ icons** + coords; with the optional **ScreenParser** detector → **typed elements** (button, link, tab, input, checkbox, …) | torch + CUDA + OmniParser weights + NVIDIA GPU ≥ 6 GB | best grounding |
 
 In `local` mode the models are loaded by **one shared vision-service process per machine**
 (`vision_service.py`), not by every agent's server: the first `parse_screen` starts it, parallel
@@ -241,6 +241,7 @@ in-progress downloads.
 | `GLOVEBOX_VISION_SOCKET` | `$XDG_RUNTIME_DIR/glovebox-vision.sock` | the service's Unix socket |
 | `GLOVEBOX_VISION_IDLE_MIN` | `15` | the service exits after this many idle minutes |
 | `GLOVEBOX_OCR_SCALE` | `2` | upscale factor before OCR in `basic` (1–4); UI text is too small for tesseract at 1x |
+| `GLOVEBOX_DETECTOR` | `auto` | detector inside `local`: `auto` = ScreenParser when installed, else OmniParser's; `omniparser` · `screenparser` force |
 | `DISPLAY` | `:1` | instance 1's display (set by `mcp-config.json`) |
 
 ## Maintenance (`local` mode)
@@ -251,6 +252,25 @@ downloads the v2 weights into `OmniParser/weights/`, and makes PaddleOCR optiona
 `python vision.py check` reports readiness. **`transformers` is pinned to 4.49.0** — newer releases
 break Florence-2's remote config. If you upgrade OmniParser manually, re-run `install-omniparser` to
 re-apply the patch.
+
+**Optional detector: ScreenParser.** OmniParser's own detector only knows "interactable icon", so
+every detected box is `type: "icon"`. [ScreenParser](https://huggingface.co/docling-project/ScreenParser)
+(docling, ICML 2026, Apache-2.0, 153 MB) is a YOLO11-L trained on 1.45M screenshots with 55 element
+classes; dropped into the same pipeline (easyocr text + Florence-2 captions) it gives `parse_screen`
+**typed elements** — `button`, `link`, `tab`, `input`, `checkbox`, `radio`, `switch`, `select`,
+`slider`, `image`, `icon`, … plus the raw `class` — and the paper reports fewer missed targets
+(ScreenSpot action accuracy 77.8 → 80.1 with a fixed agent). Install it and it is used automatically:
+
+```bash
+python vision.py install-screenparser     # downloads best.pt next to the OmniParser weights
+python vision_service.py stop             # a running vision service keeps the old detector until restarted
+```
+
+Measured on an RTX A5000 Laptop, 1440×900 Google results page: 110 elements vs. 93, same 1.7 s per
+parse (OCR and captions dominate; the detector itself is 60 ms), 10 s model load. Layout containers
+(window, toolbar, side bar, table, …) are not reported — they would swallow the text inside them.
+`GLOVEBOX_DETECTOR=omniparser|screenparser` forces one; `status()` shows
+`vision.omniparser.detector`.
 
 ## Stop
 

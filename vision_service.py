@@ -150,6 +150,7 @@ class Service:
         with self.state_lock:
             return {"running": True, "pid": os.getpid(), "socket": self.path, "fake": self.fake,
                     "loaded": bool(getattr(self.parser, "loaded", False)),
+                    "detector": getattr(self.parser, "detector", None),
                     "load_seconds": getattr(self.parser, "load_seconds", None),
                     "served": self.served, "errors": self.errors, "in_flight": self.in_flight,
                     "idle_s": int(time.time() - self.last_activity),

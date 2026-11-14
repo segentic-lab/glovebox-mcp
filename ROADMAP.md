@@ -63,6 +63,7 @@ text mirrored both ways. Not done: images on the clipboard, the PRIMARY selectio
   automation server (that is periscope's job); keep it to the two calls agents ask for most.
 - A `close_all` / `close_instance(all=True)` once multi-agent fleets are routinely left behind.
 - `parse_screen` element *types* for `basic` (buttons vs. text) via simple geometry heuristics.
+  (`local` has them since the ScreenParser detector option, 2026-11-14; `basic` still does not.)
 - Per-instance screen recording (`ffmpeg -f x11grab`) for dogfooding evidence in issues.
 - `scroll` by pixel distance instead of wheel notches where the toolkit supports it.
 

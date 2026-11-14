@@ -769,10 +769,15 @@ def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: st
     Returns {"ok", "vision", "screen": [W,H], "annotated", "count", "truncated",
     "elements": [{id, type, label, interactive, center: [x,y]}, …]} — then click_element(id).
     Also saves a numbered Set-of-Mark image (path in "annotated").
-    Backend = the effective GLOVEBOX_VISION: 'local' (OmniParser on the GPU, text + icons, ~2 s
-    after a ~6 s first-call model load; served by ONE shared vision-service process per machine so
-    parallel agents don't each load the models — "via": "service"|"in-process", "queued_ms" says
-    how long the GPU queue was), 'basic' (tesseract, text only; granularity='line'
+    Backend = the effective GLOVEBOX_VISION: 'local' (OmniParser on the GPU, ~2 s after a ~10 s
+    first-call model load; served by ONE shared vision-service process per machine so parallel
+    agents don't each load the models — "via": "service"|"in-process", "queued_ms" says how long
+    the GPU queue was. "type" is "text"|"icon" with OmniParser's own detector; with the optional
+    ScreenParser detector (status().vision.omniparser.detector) it is one of text, button, link,
+    tab, input, checkbox, radio, switch, select, slider, stepper, rating, icon, image, item,
+    indicator and each element also carries "class", the detector's raw class name; buttons/tabs/
+    links carry their visible text as "label", icons/images a short caption), 'basic' (tesseract,
+    text only; granularity='line'
     merges words on one line into one target like "Sign in" — default — or 'word' for single
     words; the frame is OCR'd at 2× (GLOVEBOX_OCR_SCALE) because UI text is too small for
     tesseract at 1×; each element also carries "confidence" 0–100), 'none' (returns a note telling you to
