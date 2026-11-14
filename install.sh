@@ -65,9 +65,13 @@ fi
 # ---- system packages — auto via apt (Debian/Ubuntu); guided elsewhere (the server is distro-agnostic) ----
 # tesseract is installed for every mode: it is small and the server's `auto` backend selection
 # falls back to it when the GPU is busy or OmniParser is not usable.
-APT_PKGS="xserver-xephyr openbox scrot x11-utils x11-xkb-utils x11-xserver-utils xdotool wmctrl xclip tesseract-ocr tesseract-ocr-slv"
+APT_PKGS="xserver-xephyr openbox scrot x11-utils x11-xkb-utils x11-xserver-utils xdotool wmctrl xclip tesseract-ocr tesseract-ocr-slv at-spi2-core gir1.2-atspi-2.0 python3-gi"
 MISS=""
 for b in Xephyr openbox xdotool wmctrl xclip xdpyinfo xkbcomp xmodmap tesseract; do command -v "$b" >/dev/null 2>&1 || MISS="$MISS $b"; done
+# AT-SPI (optional, apt only): lets fill() check which native widget has focus before it types
+if command -v apt-get >/dev/null 2>&1 && ! /usr/bin/python3 -c "import gi; gi.require_version('Atspi','2.0')" >/dev/null 2>&1; then
+  MISS="$MISS python3-gi/gir1.2-atspi-2.0"
+fi
 if [[ -z "$MISS" ]]; then
   echo "▶ System tools present (Xephyr, openbox, xdotool, wmctrl, xclip, xkbcomp, tesseract) ✓"
 elif command -v apt-get >/dev/null 2>&1; then

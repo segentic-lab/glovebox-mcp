@@ -67,7 +67,7 @@ in one call.
 | Find one element by its text | `find_elements("Sign in", instance, type="button")` → `click_element(id)` — no 300-element scan |
 | Wait for a page/dialog by its text | `wait_for_text("Welcome", instance)` → `satisfied` / `timed_out` (honest) |
 | Click a known pixel | `click(x, y, instance, observe="screenshot")` — `count=2` double, `modifiers="ctrl"` ctrl-click |
-| Set a form field (click + replace + read back) | `fill("Nadja Kovačič", x, y, instance)` or `fill("…", element=<id>)` — check `verified`; a miss fails instead of typing into nowhere |
+| Set a form field (click + focus check + replace + read back) | `fill("Nadja Kovačič", x, y, instance)` or `fill("…", element=<id>)` — a miss or an unannounced password field fails with nothing typed; passwords need `allow_password=True` |
 | Type into the focused field | `type_text("…", instance)` — unicode-safe automatically; `clear=True` replaces, `submit=True` adds Return |
 | Browser: URL, navigate, page text, JS | `browser(action="info"/"navigate"/"text"/"eval", instance, url=…, js=…)` — exact, no OCR |
 | Switch windows / dialogs, resize, close | `window_info(instance)` → `manage_window("activate"/"close"/"resize", instance, window_id)` |
@@ -95,6 +95,14 @@ in one call.
   DOM element that was under the point (`role`, `name`, `checked_before`, `href`;
   `{"role": "browser-ui"}` = toolbar/tab strip). If it is not what you meant, you misclicked.
   Native apps have no `hit`.
+- **Read `fill`'s verdict, not just `ok`** — `focus_checked: "browser-dom"|"at-spi"` means the
+  focus was on an editable field at your click before anything was typed. `focus_checked: false`
+  (canvas, game, Xlib-only app, iframe, AT-SPI not installed) means the text was typed blind:
+  the reply carries a warning and `click_effect` (`"none"` = the click changed no pixel nearby,
+  probably a static label) — screenshot before you go on. `verified: true` = read back equal;
+  `false` = the field changed the value (`value`); `null` = unreadable. When `fill` fails it
+  names what has the focus (`focus: {role, name, rect}`) — click inside that `rect` or pick
+  another target; with ScreenParser, `suggest_element` names the input next to a label.
 - **See only what changed** — `observe_region="x,y,w,h"` on any action returns just that
   rectangle (implies `observe="screenshot"`); use it for the field you just edited.
 - **`warnings` about the pointer** mean a person (or another agent) moved the mouse in your

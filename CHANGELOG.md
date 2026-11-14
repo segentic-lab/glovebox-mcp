@@ -16,13 +16,25 @@ reported to MCP clients during the initialize handshake.
   paths, `..` and symlinks out are refused), atomic, refuses to replace an
   existing file without `overwrite=true`. 29 tools. (Glama's completeness
   review listed "no file-write tool" as a gap.)
-- `fill(text, x, y | element, submit, verify)` — click a field, replace its
-  content and read the value back in one call (`verified: true|false|null`).
-  Browsers are read through the DOM, other apps through select-all + copy
-  behind a sentinel (clipboard restored). A click that missed the field or a
-  field left empty fails and nothing is submitted. 30 tools. (A dogfooding
-  agent repeated click → select-all → paste → screenshot about 30 times in
-  one session.)
+- `fill(text, x, y | element, submit, verify, allow_password)` — click a
+  field, check the focus, replace its content and read the value back in one
+  call. 30 tools. (A dogfooding agent repeated click → select-all → paste →
+  screenshot about 30 times in one session.)
+  - Focus check BEFORE typing: the page's DOM in browsers, the accessibility
+    bus (AT-SPI, new helper `a11y_focus.py` under the system python3) in
+    native apps. Focus not on an editable field, or on a field whose rectangle
+    does not contain the click (a label was clicked, the focus stayed put),
+    fails with nothing typed and `focus: {role, name, rect}`.
+  - Password fields are refused unless `allow_password=true`.
+  - `focus_checked: false` + a warning + `click_effect: "changed"|"none"`
+    where nobody can tell the focus (canvas, games, Xlib-only apps, iframes,
+    AT-SPI not installed) — a blind fill no longer reads as a clean success.
+  - With `element`, the ScreenParser detector warns when the target is a text
+    label and names the nearest input (`suggest_element`).
+  - Read-back (`verified: true|false|null`): DOM in browsers, select-all +
+    copy behind a sentinel elsewhere (clipboard restored).
+  - `install.sh` installs `at-spi2-core gir1.2-atspi-2.0 python3-gi`;
+    `status().deps` reports `atspi` and `xprop`.
 - `hit` on `click` / `double_click` / `click_element` / `fill`: in
   Chromium-family browsers, the element under the point (role, name,
   `checked_before`, `disabled`, `href`), read from the DOM before the click;
@@ -39,6 +51,12 @@ reported to MCP clients during the initialize handshake.
   `find_elements` / `click_element` / `wait_for_text` / `fill`: clients that
   load tool schemas lazily never showed them to the agent, which then
   clicked by pixel and misclicked.
+
+### Fixed
+- A second click (or `move_mouse`, `scroll`, a `drag` step) on the spot where
+  the pointer already was hung for ~15 s: `xdotool mousemove --sync` waits
+  for a movement that never comes. The move is skipped when the pointer is
+  already there.
 
 ## [0.5.1] - 2026-11-14
 

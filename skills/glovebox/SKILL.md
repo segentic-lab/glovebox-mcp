@@ -66,7 +66,7 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 
 | Goal | Call |
 |---|---|
-| Set a form field, verified | `fill("…", x, y, instance)` or `fill("…", element=id)` — clicks, replaces, reads the value back (`verified`); use it for every field of a form |
+| Set a form field, verified | `fill("…", x, y, instance)` or `fill("…", element=id)` — clicks, checks the focus BEFORE typing, replaces, reads back. Fails with nothing typed on a miss or a password field (`allow_password=True` to mean it) |
 | Type into the focused field | click it, then `type_text("…", instance, clear=True, submit=True)` — unicode (č/š/ž) is handled |
 | Keys, shortcuts, sequences | `press_keys("ctrl+l", instance)` · `press_keys("ctrl+a Delete")` — validated before pressing |
 | Exact text out of the app | select (drag / `ctrl+a`) → `press_keys("ctrl+c")` → `clipboard(action="get")` — no OCR |
@@ -89,6 +89,9 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
   and `wait_for_text`; if your client defers tool schemas, load those and `fill` first.
 - **Read `hit`.** Browser clicks return the element under the point (`role`, `name`,
   `checked_before`) — if it is not what you meant, you misclicked; fix it before going on.
+- **`fill` is confirmed only when it says so.** `focus_checked: false` = typed blind (canvas,
+  game, iframe): read the warning and `click_effect`, then screenshot. `verified: true` = the
+  value was read back equal.
 - **Look at less.** `observe_region="x,y,w,h"` returns only that rectangle after an action.
 - **`warnings` about the pointer** = someone else is using your instance; screenshot before
   the next step.

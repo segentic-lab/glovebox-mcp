@@ -379,6 +379,9 @@ def test_fill_verdicts(monkeypatch):
     monkeypatch.setattr(server, "_type_into", lambda n, action, text, clear=False: "xdotool")
     monkeypatch.setattr(server, "_xdo", lambda n, action, sub, *a, **kw: keys.append(a))
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    monkeypatch.setattr(server, "_focus_guard", lambda *a: {"focus_checked": "at-spi"})
+    monkeypatch.setattr(server, "_grab", lambda n: Image.new("RGB", (800, 600)))
+    server._set_geometry(7, 800, 600)
 
     def run(read, text="Žiga", **kw):
         monkeypatch.setattr(server, "_read_field", lambda n, action: read)
@@ -388,11 +391,11 @@ def test_fill_verdicts(monkeypatch):
     p = run(("Žiga\n", "clipboard", None))
     assert p["verified"] is True and p["submitted"] is True and keys == [("Return",)]
     p = run(("Ziga", "browser-dom", "input"))
-    assert p["verified"] is False and p["value"] == "Ziga" and "warning" in p
+    assert p["verified"] is False and p["value"] == "Ziga" and "different value" in p["warnings"][0]
     p = run((None, "unreadable", None))
     assert p["verified"] is None and "note" in p
     assert run(("anything", "clipboard", None), verify=False)["read_back"] == "skipped"
-    for read, needle in (((None, "browser-dom", "body"), "missed"), (("", "browser-dom", "input"), "still empty")):
+    for read, needle in (((None, "browser-dom", "body"), "moved the focus"), (("", "browser-dom", "input"), "still empty")):
         with pytest.raises(ToolError) as e:
             run(read)
         assert needle in json.loads(str(e.value))["error"] and keys == [], "a failed fill must not press Return"
@@ -401,3 +404,101 @@ def test_fill_verdicts(monkeypatch):
     assert "nothing was done" in json.loads(str(e.value))["error"]
     with pytest.raises(ToolError):
         server.fill("x", instance=7, element=3)              # id from no parse
+
+
+def test_fill_types_nothing_when_the_focus_check_fails(monkeypatch):
+    """The guard runs between the click and the typing: a miss or an unannounced password field
+    must fail with nothing typed; 'nobody could tell' must not read as success."""
+    _vision(monkeypatch)
+    _no_browser(monkeypatch)
+    typed = []
+    monkeypatch.setattr(server, "_click_at", lambda *a, **kw: None)
+    monkeypatch.setattr(server, "_type_into", lambda n, action, text, clear=False: typed.append(text) or "xdotool")
+    monkeypatch.setattr(server, "_read_field", lambda n, action: (None, "unreadable", None))
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    monkeypatch.setattr(server, "_grab", lambda n: Image.new("RGB", (800, 600)))
+    monkeypatch.setattr(server, "_cdp_pages", lambda *a, **kw: (_ for _ in ()).throw(OSError("no browser")))
+    server._set_geometry(7, 800, 600)
+    entry = {"role": "text", "name": "Ime", "rect": [100, 100, 300, 30], "editable": True, "password": False}
+
+    def run(focus, why="", **kw):
+        monkeypatch.setattr(server, "_a11y_focus", lambda n: (focus, why))
+        typed.clear()
+        return json.loads(server.fill("abc", 200, 110, 7, **kw))
+
+    p = run(entry)
+    assert p["focus_checked"] == "at-spi" and p["focus"]["role"] == "text" and typed == ["abc"]
+    assert run({**entry, "rect": [100, 100, 300, 8]})["focus_checked"] == "at-spi"   # 2 px below: slack
+    for focus, needle in (({**entry, "role": "label", "editable": False}, "not an editable field"),
+                          ({**entry, "rect": [100, 300, 300, 30]}, "did not move the focus"),
+                          ({**entry, "role": "password text", "password": True}, "password field")):
+        with pytest.raises(ToolError) as e:
+            run(focus)
+        err = json.loads(str(e.value))
+        assert needle in err["error"] and "nothing was typed" in err["error"] and typed == []
+        assert err["focus"]["role"] == focus["role"]
+    assert run({**entry, "role": "password text", "password": True}, allow_password=True)["read_back"] == "unreadable"
+    # nobody could tell: typed, but flagged — and a static frame says the click changed nothing
+    p = run(None, "the app exposes no focused widget")
+    assert p["focus_checked"] is False and p["click_effect"] == "none" and p["verified"] is None
+    assert "WITHOUT knowing" in p["warnings"][0] and "static label" in p["warnings"][0] and typed == ["abc"]
+
+
+def test_fill_browser_focus_guard(monkeypatch):
+    from contextlib import contextmanager
+    answer = {}
+
+    @contextmanager
+    def fake_cdp(port, page_url_contains="", timeout=15):
+        yield (lambda method, params=None: {"result": {"value": answer["v"]}}), {}, []
+    monkeypatch.setattr(server, "_cdp", fake_cdp)
+    monkeypatch.setattr(server, "_a11y_focus", lambda n: pytest.fail("browsers are checked through the DOM"))
+    answer["v"] = {"tag": "input", "value": "", "password": False}
+    assert server._focus_guard(7, 5, 5, False, {}) == {"focus_checked": "browser-dom"}
+    answer["v"] = {"tag": "iframe", "unknown": True}
+    assert server._focus_guard(7, 5, 5, False, {})["focus_checked"] is False
+    for v, allow, needle in (({"tag": "body"}, False, "<body>"),
+                             ({"tag": "input", "value": "", "password": True}, False, "password field")):
+        answer["v"] = v
+        with pytest.raises(ToolError) as e:
+            server._focus_guard(7, 5, 5, allow, {})
+        assert needle in json.loads(str(e.value))["error"]
+    assert server._focus_guard(7, 5, 5, True, {})["focus_checked"] == "browser-dom"   # password, announced
+
+
+def test_label_warning_needs_a_typed_detector_and_suggests_the_input():
+    els = {1: {"id": 1, "type": "text", "label": "Geslo", "center": [100, 200]},
+           2: {"id": 2, "type": "input", "label": "", "center": [300, 204]},
+           3: {"id": 3, "type": "input", "label": "", "center": [300, 400]},
+           4: {"id": 4, "type": "button", "label": "OK", "center": [100, 500]}}
+    try:
+        server._LAST_EL[45] = {"typed": True, "elements": els}
+        w = server._label_warning(45, 1)
+        assert "not an input field" in w["warnings"][0] and w["suggest_element"]["id"] == 2
+        assert server._label_warning(45, 2) == {} and server._label_warning(45, 4) == {}
+        server._LAST_EL[45]["typed"] = False        # OCR / OmniParser-only: every label is "text"
+        assert server._label_warning(45, 1) == {}
+    finally:
+        server._LAST_EL.pop(45, None)
+
+
+def test_pointer_already_at_target_is_not_moved(monkeypatch):
+    """xdotool mousemove --sync waits ~15 s when the pointer does not have to move."""
+    sent = []
+    monkeypatch.setattr(server, "_xdo", lambda n, action, sub, *a, **kw: sent.append((sub, a)))
+    monkeypatch.setattr(server, "_pointer", lambda n: (10, 20))
+    try:
+        server._move(46, "click", 10, 20)
+        assert sent == []
+        server._move(46, "click", 11, 20)
+        assert sent == [("mousemove", (11, 20))] and server._PTR[46] == (11, 20)
+    finally:
+        server._PTR.pop(46, None)
+
+
+def test_a11y_helper_reports_missing_bindings_as_json():
+    """The helper must answer in JSON whatever python runs it (the venv has no PyGObject)."""
+    import sys
+    r = subprocess.run([sys.executable, "-I", server.A11Y_HELPER, "--check"], capture_output=True, text=True, timeout=30)
+    d = json.loads(r.stdout)
+    assert d["ok"] is True or "not importable" in d["error"]

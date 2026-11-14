@@ -616,3 +616,74 @@ def test_hardening_and_new_tools(x99, xmessage_window):
             rows = payload(r)["instances"]
             assert all("title" in row and "clipboard_sync" in row for row in rows)
     asyncio.run(run())
+
+
+GTK_FORM = """
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+w = Gtk.Window(title="form"); w.set_default_size(500, 220)
+b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10); w.add(b)
+e = Gtk.Entry(); b.pack_start(e, False, False, 10)
+p = Gtk.Entry(); p.set_visibility(False); b.pack_start(p, False, False, 10)
+b.pack_start(Gtk.Label(label="just a label"), True, True, 10)
+w.connect("destroy", Gtk.main_quit); w.show_all(); Gtk.main()
+"""
+
+
+def _system_gtk_atspi():
+    py = "/usr/bin/python3"
+    if not os.path.exists(py):
+        return None
+    r = subprocess.run([py, "-c", "import gi; gi.require_version('Gtk','3.0'); gi.require_version('Atspi','2.0')"],
+                       capture_output=True)
+    return py if r.returncode == 0 else None
+
+
+@pytest.mark.skipif(not (shutil.which("Xephyr") and shutil.which("xprop") and shutil.which("dbus-run-session")
+                         and _system_gtk_atspi()), reason="Xephyr, xprop, dbus-run-session or system PyGObject (Gtk+Atspi) missing")
+def test_fill_checks_the_focus_of_a_native_app(x99, tmp_path):
+    """fill() on a real GTK window: the entry is filled and verified; a click on a label (the
+    focus stays in the entry) and an unannounced password field fail with nothing typed."""
+    script = tmp_path / "form.py"
+    script.write_text(GTK_FORM)
+
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
+            p = payload(await s.call_tool("launch_app", {"command": f"/usr/bin/python3 {script}", "size": "700x400"}))
+            n = p["instance"]
+            try:
+                win = None
+                for _i in range(40):
+                    w = payload(await s.call_tool("window_info", {"instance": n}))
+                    if w.get("active") and w["active"]["title"] == "form":
+                        win = w["active"]
+                        break
+                    await asyncio.sleep(0.5)
+                assert win, "the GTK window never appeared"
+                await asyncio.sleep(1.0)
+                cx = win["x"] + win["width"] // 2
+                r = await s.call_tool("fill", {"text": "abc", "x": cx, "y": win["y"] + 27, "instance": n})
+                p = payload(r)
+                if p.get("focus_checked") is False:
+                    pytest.skip("no AT-SPI bus in this environment: " + p.get("focus_unchecked_reason", ""))
+                assert not r.is_error and p["focus_checked"] == "at-spi" and p["focus"]["role"] == "text"
+                if shutil.which("xclip"):
+                    assert p["verified"] is True and p["read_back"] == "clipboard"
+                r = await s.call_tool("fill", {"text": "oops", "x": cx, "y": win["y"] + win["height"] - 40, "instance": n})
+                p = payload(r)
+                assert r.is_error and "nothing was typed" in p["error"] and p["focus"]["role"] == "text"
+                r = await s.call_tool("fill", {"text": "secret", "x": cx, "y": win["y"] + 71, "instance": n})
+                p = payload(r)
+                assert r.is_error and "password field" in p["error"] and "allow_password" in p["fix"]
+                r = await s.call_tool("fill", {"text": "secret", "x": cx, "y": win["y"] + 71, "instance": n,
+                                               "allow_password": True})
+                p = payload(r)
+                assert not r.is_error and p["focus"]["role"] == "password text" and p["verified"] is None
+                # clicking the same spot again must not hang (mousemove --sync with nothing to move)
+                t0 = time.time()
+                r = await s.call_tool("click", {"x": cx, "y": win["y"] + 71, "instance": n})
+                assert not r.is_error and time.time() - t0 < 5
+            finally:
+                await s.call_tool("close_instance", {"instance": n})
+    asyncio.run(run())

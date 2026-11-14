@@ -84,6 +84,11 @@ INSTANCES = {}   # N -> {name, command, size, xephyr_pid, app_pid}
 _LAST = {}       # N -> {element id -> (cx, cy)} from that instance's last parse_screen
 _GEOM = {}       # N -> (W, H, read_at) cached display geometry (bounds checks; refreshed after GEOM_TTL)
 _LAUNCHED = set()  # instances started by THIS process (for optional cleanup on exit)
+_LAST_EL = {}    # N -> {"typed": bool, "elements": {id: element}} from the last parse (fill's label check)
+_A11Y = {"at": 0.0, "python": None}   # interpreter that can import Atspi (re-probed every 60 s)
+A11Y_HELPER = os.path.join(HERE, "a11y_focus.py")
+A11Y_APT = "sudo apt install at-spi2-core gir1.2-atspi-2.0 python3-gi"
+FOCUS_SLACK = 8  # px: toolkits accept clicks slightly outside the rectangle they report over AT-SPI
 _PTR = {}        # N -> (x, y) where THIS server last left the pointer (foreign-input detection)
 _LOCK = threading.RLock()
 _ILOCKS = defaultdict(threading.RLock)   # per-instance: one cursor/keyboard/clipboard = one sequence at a time
@@ -545,6 +550,8 @@ def _kill_xephyr(n):
 def _forget(n):
     INSTANCES.pop(n, None)
     _LAST.pop(n, None)
+    _LAST_EL.pop(n, None)
+    _PTR.pop(n, None)
     _GEOM.pop(n, None)
     _LAUNCHED.discard(n)
 
@@ -963,6 +970,7 @@ def _do_parse(instance: int = 1, box_threshold: float = 0.05, granularity: str =
         except vision.VisionError as e:
             _fail("parse_screen", e.error, fix=e.fix, instance=n, vision=mode)
         _LAST[n] = {e["id"]: tuple(e["center"]) for e in elems}
+        _LAST_EL[n] = {"typed": base.get("detector") == "screenparser", "elements": {e["id"]: e for e in elems}}
     total = len(elems)
     truncated = total > PARSE_MAX
     if truncated:
@@ -1157,6 +1165,18 @@ def _pointer(n):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
+def _move(n, action, x, y, at=None):
+    """Move the pointer to (x, y) and wait until it is there. `xdotool mousemove --sync` waits
+    for the pointer to MOVE — when it already is at the target it waits ~15 s for nothing (a
+    second click on the same spot used to hang that long), so that case is skipped. `at`: the
+    position the caller already knows (drag steps), to save a lookup."""
+    x, y = int(x), int(y)
+    if (at or _pointer(n)) != (x, y):
+        _xdo(n, action, "mousemove", x, y, opts=("--sync",))
+    _PTR[n] = (x, y)
+    return (x, y)
+
+
 def _foreign_input(n) -> dict:
     """{"warnings": [...]} when the pointer is not where this server left it — the person (the
     window is theirs too) or another agent is using the instance, so earlier coordinates and the
@@ -1207,7 +1227,8 @@ _FOCUS_JS = r"""(function() {
   if (!e) return null;
   var tag = e.tagName.toLowerCase();
   if (tag === "iframe") return {tag: tag, unknown: true};
-  if (tag === "input" || tag === "textarea") return {tag: tag, value: String(e.value)};
+  if (tag === "input" || tag === "textarea")
+    return {tag: tag, value: String(e.value), password: (e.type || "").toLowerCase() === "password"};
   if (e.isContentEditable) return {tag: tag, value: String(e.innerText)};
   return {tag: tag};
 })()"""
@@ -1249,8 +1270,7 @@ def _click_at(n, action, x, y, button=1, count=1, modifiers=""):
     the click fails (a stuck ctrl would turn every later click into a ctrl-click)."""
     mods = _modifier_keys(modifiers, action, n)
     _check_xy(action, n, (x, y))
-    _xdo(n, action, "mousemove", x, y, opts=("--sync",))
-    _PTR[n] = (int(x), int(y))
+    _move(n, action, x, y)
     for m in mods:
         _xdo(n, action, "keydown", m)
     try:
@@ -1318,13 +1338,13 @@ def drag(x1: int, y1: int, x2: int, y2: int, instance: int = 1, button: int = 1,
     steps = max(1, min(int(steps), 100))
     with _ilock(n):
         extra = _foreign_input(n)
-        _xdo(n, "drag", "mousemove", x1, y1, opts=("--sync",))
+        at = _move(n, "drag", x1, y1)
         _xdo(n, "drag", "mousedown", button)
         try:
             for i in range(1, steps + 1):
                 xi = round(x1 + (x2 - x1) * i / steps)
                 yi = round(y1 + (y2 - y1) * i / steps)
-                _xdo(n, "drag", "mousemove", xi, yi, opts=("--sync",))
+                at = _move(n, "drag", xi, yi, at)
                 if steps > 1:
                     time.sleep(0.01)
         finally:
@@ -1470,6 +1490,148 @@ def type_text(text: str, instance: int = 1, clear: bool = False, submit: bool = 
                          "method": method, "cleared": bool(clear), "submitted": bool(submit)})
 
 
+def _a11y_python():
+    """An interpreter that can import Atspi — normally the SYSTEM python3 (the venv has no
+    PyGObject) — or None. Probed at most once a minute, so installing the packages takes effect
+    without a restart."""
+    if time.time() - _A11Y["at"] < 60:
+        return _A11Y["python"]
+    found = None
+    for c in dict.fromkeys(x for x in (sys.executable, "/usr/bin/python3", shutil.which("python3")) if x):
+        try:
+            r = subprocess.run([c, "-I", A11Y_HELPER, "--check"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and json.loads(r.stdout or "{}").get("ok"):
+                found = c
+                break
+        except Exception:
+            continue
+    _A11Y.update(at=time.time(), python=found)
+    return found
+
+
+def _a11y_focus(n):
+    """(focus | None, why): the widget with keyboard focus on instance n, asked from THAT
+    display's accessibility bus (its address is a property of the display's root window; the
+    host's session bus is removed from the helper's environment so the host's focus can never be
+    reported). focus = {role, name, rect, editable, password, app}; None + why when it cannot be
+    known (packages missing, no bus on the display, the app exposes nothing)."""
+    py = _a11y_python()
+    if not py:
+        return None, f"AT-SPI bindings are not installed on the host ({A11Y_APT})"
+    try:
+        r = subprocess.run(["xprop", "-root", "-display", _disp(n), "AT_SPI_BUS"], capture_output=True,
+                           text=True, timeout=3)
+        m = re.search(r'=\s*"(.+)"', r.stdout or "")
+        if not m:
+            return None, "no accessibility bus on this display (the app does not speak AT-SPI)"
+        env = {**_env(n), "AT_SPI_BUS_ADDRESS": m.group(1)}
+        env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        out = subprocess.run([py, "-I", A11Y_HELPER], env=env, capture_output=True, text=True, timeout=5)
+        d = json.loads(out.stdout or "{}")
+    except Exception as e:
+        return None, f"the accessibility lookup failed ({type(e).__name__})"
+    if not d.get("ok"):
+        return None, f"the accessibility lookup failed ({str(d.get('error'))[:120]})"
+    if not d.get("focus"):
+        return None, "the app exposes no focused widget over AT-SPI (canvas, game or Xlib-only app)"
+    return d["focus"], ""
+
+
+def _focus_guard(n, x, y, allow_password, extra) -> dict:
+    """Between fill's click and its typing: is the keyboard focus on an editable field AT the
+    clicked point? Raises (nothing typed yet) when it provably is not, or when it is a password
+    field the caller did not announce. Returns {"focus_checked": "browser-dom" | "at-spi" | False,
+    "focus"?, "focus_unchecked_reason"?} — False means nobody could tell, never "it was fine"."""
+    pw_fix = ("pass allow_password=true if you mean to type a password here; otherwise the click landed on "
+              "the wrong field — screenshot and target the right one")
+    v = None
+    try:
+        with _cdp(_cdp_port(n), timeout=3) as (cmd, _target, _pages):
+            v = cmd("Runtime.evaluate", {"expression": _FOCUS_JS, "returnByValue": True}).get("result", {}).get("value")
+    except Exception:
+        pass
+    if isinstance(v, dict):
+        if v.get("unknown"):
+            return {"focus_checked": False, "focus_unchecked_reason": "the focus is inside an iframe"}
+        if not isinstance(v.get("value"), str):
+            _fail("fill", f"after the click the browser's focus is on <{v.get('tag')}>, not a text field — the click "
+                          f"at ({x},{y}) missed; nothing was typed",
+                  fix="screenshot / find_elements to locate the field, then fill() again; for a custom widget "
+                      "use click + type_text", instance=n, **extra)
+        if v.get("password") and not allow_password:
+            _fail("fill", f"the field focused by the click at ({x},{y}) is a password field — nothing was typed",
+                  fix=pw_fix, instance=n, **extra)
+        return {"focus_checked": "browser-dom"}
+    f, why = _a11y_focus(n)
+    if f is None:
+        return {"focus_checked": False, "focus_unchecked_reason": why}
+    focus = {"role": f.get("role"), "name": f.get("name"), "rect": f.get("rect")}
+    what = f"{focus['role']}" + (f" '{focus['name']}'" if focus["name"] else "")
+    if not f.get("editable"):
+        _fail("fill", f"after the click the keyboard focus is on a {what}, not an editable field — the click at "
+                      f"({x},{y}) missed; nothing was typed",
+              fix="screenshot to locate the field, then fill() again", instance=n, focus=focus, **extra)
+    r = f.get("rect") or []
+    if len(r) == 4 and r[2] > 0 and r[3] > 0 and not (
+            r[0] - FOCUS_SLACK <= x < r[0] + r[2] + FOCUS_SLACK and r[1] - FOCUS_SLACK <= y < r[1] + r[3] + FOCUS_SLACK):
+        _fail("fill", f"the click at ({x},{y}) did not move the focus: it is still on the {what} at {r} (x,y,w,h), "
+                      "which does not contain that point — nothing was typed",
+              fix=f"you clicked something that takes no focus (a label?); click inside {r} to fill that field, "
+                  "or screenshot to find the one you meant", instance=n, focus=focus, **extra)
+    if f.get("password") and not allow_password:
+        _fail("fill", f"the field focused by the click at ({x},{y}) is a password field — nothing was typed",
+              fix=pw_fix, instance=n, focus=focus, **extra)
+    return {"focus_checked": "at-spi", "focus": focus}
+
+
+def _label_warning(n, element):
+    """With a detector that knows element types (ScreenParser): warn when fill() targets a text
+    label / image, and name the nearest input to its right or below. {} otherwise — OCR-only
+    backends call everything 'text', so they cannot tell."""
+    last = _LAST_EL.get(n) or {}
+    els = last.get("elements") or {}
+    el = els.get(element)
+    if not last.get("typed") or not el or el.get("type") not in vision.SP_NON_INTERACTIVE:
+        return {}
+    ex, ey = el["center"]
+    best = None
+    for c in els.values():
+        if c.get("type") != "input":
+            continue
+        dx, dy = c["center"][0] - ex, c["center"][1] - ey
+        if (dx > 0 and abs(dy) <= 25) or (dy > 0 and abs(dx) <= 250):
+            d = (dx * dx + dy * dy) ** 0.5
+            if best is None or d < best[0]:
+                best = (d, c)
+    out = {"warnings": [f"element {element} is a {el.get('type')} label ('{(el.get('label') or '')[:40]}'), not an "
+                        "input field" + (f" — the nearest input is element {best[1]['id']}" if best else "")]}
+    if best:
+        out["suggest_element"] = {"id": best[1]["id"], "label": best[1].get("label"), "center": list(best[1]["center"])}
+    return out
+
+
+def _click_effect(n, x, y, before):
+    """'changed' | 'none' | None: did anything within ~150x50 px of the click point change?
+    Two frames after the click, so a caret that happens to be in its 'off' blink phase in one of
+    them is not read as 'nothing happened'. Evidence only — a click on an already-focused field
+    changes nothing either."""
+    if before is None:
+        return None
+    try:
+        for i in range(2):
+            if i:
+                time.sleep(0.15)
+            if _changed_fraction(before, _crop_around(_grab(n), x, y)) > 0.0005:
+                return "changed"
+        return "none"
+    except Exception:
+        return None
+
+
+def _crop_around(img, x, y):
+    return img.crop((max(0, x - 150), max(0, y - 50), min(img.width, x + 150), min(img.height, y + 50)))
+
+
 def _read_field(n, action):
     """Read back the focused field after a fill → (value | None, how, focus_tag | None).
     Browser: the focused element's value over CDP (exact, clipboard untouched); a focus that is
@@ -1505,27 +1667,43 @@ def _read_field(n, action):
 
 @mcp.tool()
 def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = -1, submit: bool = False,
-         verify: bool = True, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
-    """Set a form field in ONE verified call: click it, replace its content with `text`, read
-    the value back. Use it instead of click + type_text + screenshot for every field of a form.
+         verify: bool = True, allow_password: bool = False, observe: str = "none", settle_ms: int = 0,
+         observe_region: str = ""):
+    """Set a form field in ONE verified call: click it, check the focus, replace its content
+    with `text`, read the value back. Use it instead of click + type_text + screenshot for every
+    field of a form.
 
     Target the field with x,y (absolute pixels) or `element` (an id from parse_screen/
-    find_elements). The old content is replaced (select-all, then type; text="" empties the
-    field). submit=true presses Return afterwards — only when the read-back did not fail.
-    Returns {"ok", "action", "instance", "detail", "method", "verified": true|false|null,
-    "read_back": "browser-dom"|"clipboard"|"unreadable", "value"? , "hit"?, "warnings"?}:
-      verified true  — the field now holds exactly `text` (trailing newline ignored);
+    find_elements). Steps and what each can tell you:
+      1. click, then a FOCUS CHECK before anything is typed — browsers through the page's DOM,
+         native GTK/Qt/LibreOffice apps through the accessibility bus (AT-SPI). If the focus is
+         not on an editable field, or is on a field whose rectangle does not contain the click
+         (you clicked a label; the focus stayed where it was), the call FAILS with nothing typed
+         and "focus" naming what has it. A password field is refused the same way unless
+         allow_password=true — landing in one by accident is the case worth stopping.
+      2. the old content is replaced (select-all, then type; text="" empties the field);
+      3. the value is read back; submit=true presses Return only if nothing failed.
+    Returns {"ok", "action", "instance", "detail", "method", "center",
+     "focus_checked": "browser-dom"|"at-spi"|false, "focus"?: {role, name, rect},
+     "verified": true|false|null, "read_back": "browser-dom"|"clipboard"|"unreadable"|"skipped",
+     "value"?, "click_effect"?: "changed"|"none", "suggest_element"?, "hit"?, "warnings"?}:
+      focus_checked false — nobody could tell which widget had focus (canvas, game, Xlib-only
+        app, iframe, or AT-SPI not installed: "focus_unchecked_reason"). The text was typed
+        blind; "warnings" says so and "click_effect" reports whether the click changed any pixel
+        near the target ("none" = probably a static label). Treat such a fill as UNCONFIRMED
+        and screenshot.
+      verified true  — the focused field holds exactly `text` (trailing newline ignored);
       verified false — it holds something else ("value", first 200 chars): the field reformats
-                       or limits input (dates, phone masks, maxlength) — "warning" says so;
-      verified null  — the value could not be read (password field in a native app, canvas,
-                       iframe): screenshot to check. verify=false skips the read-back.
-    Fails (isError), having clicked and typed, when a browser's focus is not on a text field
-    after the click (the click missed — "hit" says what it landed on) or when the field is
-    still empty: nothing is submitted then, and repeating fill() is safe (it replaces).
-    Read-back: browsers answer through the page's DOM; other apps through select-all + copy
-    (the clipboard is restored). `observe`/`settle_ms`/`observe_region`: see click()."""
+        or limits input (dates, phone masks, maxlength);
+      verified null  — the value could not be read (native password field, canvas).
+    With `element`, a typed detector (ScreenParser) warns when the element is a text label and
+    names the nearest input ("suggest_element"). Also fails (isError) when the field is still
+    empty after typing; repeating fill() is always safe (it replaces). Native read-back goes
+    through select-all + copy (the clipboard is restored). `observe`/`settle_ms`/
+    `observe_region`: see click()."""
     n = _require("fill", instance)
     observe = _validate_observe("fill", n, observe, observe_region)
+    extra = {}
     if int(element) >= 0:
         last = _LAST.get(n, {})
         if element not in last:
@@ -1533,29 +1711,52 @@ def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = 
                   fix="run parse_screen/find_elements first — ids are only valid for the most recent parse",
                   instance=n, known_ids=len(last))
         x, y = last[element]
+        extra = _label_warning(n, element)
     elif x < 0 or y < 0:
         _fail("fill", "no target — nothing was done", fix="pass x and y (pixels) or element=<id from find_elements>",
               instance=n)
+    x, y = int(x), int(y)
     with _ilock(n):
-        extra = {**_foreign_input(n), **_hit_kw(n, x, y)}
+        warnings = extra.pop("warnings", []) + _foreign_input(n).get("warnings", [])
+        extra.update(_hit_kw(n, x, y))
+        before = None
+        if "hit" not in extra:            # no browser: keep a frame for the click_effect fallback
+            _check_xy("fill", n, (x, y))
+            try:
+                before = _crop_around(_grab(n), x, y)
+            except Exception:
+                pass
         _click_at(n, "fill", x, y)
-        time.sleep(0.15)            # focus handlers run before we type
+        time.sleep(0.15)                  # focus handlers run before we look
+        if warnings:
+            extra["warnings"] = warnings
+        res = {"center": [x, y], **_focus_guard(n, x, y, allow_password, extra)}
+        if res["focus_checked"] is False:
+            effect = _click_effect(n, x, y, before)
+            if effect:
+                res["click_effect"] = effect
+            warnings.append("typed WITHOUT knowing which field had focus (" + res["focus_unchecked_reason"] + ")"
+                            + (" and the click changed nothing near the target — it may have hit a static label"
+                               if effect == "none" else "") + "; screenshot to confirm where the text went")
         if text == "":
             _xdo(n, "fill", "key", "ctrl+a", "BackSpace", opts=("--clearmodifiers", "--delay", "40"))
             method = "xdotool"
         else:
             method = _type_into(n, "fill", text, clear=True)
-        res = {"method": method, "verified": None, "read_back": "skipped", "center": [int(x), int(y)]}
-        if verify:
+        res.update(method=method, verified=None, read_back="skipped")
+        if verify and (res.get("focus") or {}).get("role") == "password text":
+            # toolkits refuse to copy out of a password entry (and GTK makes the attempt slow)
+            res.update(read_back="unreadable", note="a native password field cannot be read back; the focus "
+                                                    "check confirmed the field")
+        elif verify:
             time.sleep(0.15)
             got, how, tag = _read_field(n, "fill")
             res["read_back"] = how
             norm = lambda v: v.replace("\r\n", "\n").rstrip("\n")
             if got is None and how == "browser-dom":
-                _fail("fill", f"after the click the browser's focus is on <{tag}>, not a text field — the click at "
-                              f"({x},{y}) missed and the text went nowhere (nothing was submitted)",
-                      fix="screenshot / find_elements to locate the field, then fill() again; inside an iframe "
-                          "or a custom widget use click + type_text", instance=n, **extra)
+                _fail("fill", f"after typing, the browser's focus is on <{tag}>, not a text field — the page moved "
+                              "the focus while typing; the text may be incomplete (nothing was submitted)",
+                      fix="screenshot to see the field's state, then fill() again", instance=n, **extra)
             if got is None:
                 res["note"] = "the value could not be read back — screenshot to confirm"
             elif norm(got) == norm(text):
@@ -1565,11 +1766,13 @@ def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = 
                       fix="the field may be read-only or not focused — screenshot, then click it and retry",
                       instance=n, read_back=how, **extra)
             else:
-                res.update(verified=False, value=got[:200],
-                           warning="the field holds a different value than the text sent — it reformats or "
-                                   "limits input, or the paste partly missed; check \"value\"")
+                res.update(verified=False, value=got[:200])
+                warnings.append("the field holds a different value than the text sent — it reformats or limits "
+                                "input, or the paste partly missed; check \"value\"")
         if submit:
             _xdo(n, "fill", "key", "Return", opts=("--clearmodifiers",))
+        if warnings:
+            extra["warnings"] = warnings
         return _observe(n, observe, settle_ms,
                         {"action": "fill", **extra, **res, "submitted": bool(submit),
                          "detail": f"filled {len(text)} chars at ({x},{y})" + (" + Return" if submit else "")})
@@ -1921,8 +2124,7 @@ def move_mouse(x: int, y: int, instance: int = 1) -> str:
     n = _require("move_mouse", instance)
     _check_xy("move_mouse", n, (x, y))
     with _ilock(n):
-        _xdo(n, "move_mouse", "mousemove", x, y, opts=("--sync",))
-        _PTR[n] = (int(x), int(y))
+        _move(n, "move_mouse", x, y)
     return _ok("move_mouse", n, detail=f"moved to ({x},{y})")
 
 
@@ -1963,8 +2165,7 @@ def scroll(amount: int = 3, instance: int = 1, x: int = -1, y: int = -1, axis: s
     with _ilock(n):
         extra = _foreign_input(n)
         if x >= 0 or y >= 0:
-            _xdo(n, "scroll", "mousemove", x, y, opts=("--sync",))
-            _PTR[n] = (int(x), int(y))
+            _move(n, "scroll", x, y)
         _xdo(n, "scroll", "click", btn, opts=("--repeat", str(applied), "--delay", "20"))
         return _observe(n, observe, settle_ms,
                         {"action": "scroll", **extra, "detail": f"scrolled {amount:+d} {axis}" + (f" (applied {applied})" if applied != abs(amount) else ""),
@@ -2157,7 +2358,7 @@ def status() -> str:
     tesseract: {binary, pytesseract, langs, lang, ready, reason}},
     "instances": [...same as list_instances], "keyboard": {host_layout, override}, "clipboard_sync":
     {enabled, poll_s, note}, "deps": {xdotool, xclip, xephyr, openbox, wmctrl, xdpyinfo, xkbcomp,
-    setxkbmap, dbus_run_session, tesseract, nvidia_smi: true|false}, "notes": [...], "tips": [...]}
+    setxkbmap, dbus_run_session, tesseract, nvidia_smi, xprop, atspi: true|false}, "notes": [...], "tips": [...]}
     ("tips": the tools that save the most round-trips on this setup — read them once).
     "vision.effective" is the grounding backend actually in use (none|basic|local), re-resolved
     every 20 s (installing OmniParser takes effect without a restart); when GLOVEBOX_VISION=auto it
@@ -2188,7 +2389,12 @@ def status() -> str:
     deps = {k: bool(shutil.which(b)) for k, b in (
         ("xdotool", "xdotool"), ("xclip", "xclip"), ("xephyr", "Xephyr"), ("openbox", "openbox"),
         ("wmctrl", "wmctrl"), ("xdpyinfo", "xdpyinfo"), ("xkbcomp", "xkbcomp"), ("setxkbmap", "setxkbmap"),
-        ("dbus_run_session", "dbus-run-session"), ("tesseract", "tesseract"), ("nvidia_smi", "nvidia-smi"))}
+        ("dbus_run_session", "dbus-run-session"), ("tesseract", "tesseract"), ("nvidia_smi", "nvidia-smi"),
+        ("xprop", "xprop"))}
+    deps["atspi"] = bool(_a11y_python())
+    if not deps["atspi"]:
+        notes.append("AT-SPI bindings are missing: fill() cannot check the focus in native apps and types "
+                     f"blind there (focus_checked: false) — {A11Y_APT}")
     keyboard = {"host_layout": host_bridge.display_layout(HOST, _host_env()),
                 "override": os.environ.get("GLOVEBOX_KEYBOARD", "")}
     v = vision.resolve(omni=omni, tess=tess, service_loaded=bool(svc and svc.get("loaded")))
