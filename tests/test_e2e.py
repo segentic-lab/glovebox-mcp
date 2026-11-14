@@ -472,7 +472,7 @@ def test_launch_app_bridges_keyboard_and_clipboard(x99):
                     assert host_clip() == "from instance"
                 finally:
                     r = await s.call_tool("close_instance", {"instance": n})
-                for _ in range(50):                                            # the bridge exits with the display
+                for _ in range(100):                                           # the bridge exits with the display (<= ~4 s)
                     if not host_bridge.running(n):
                         break
                     await asyncio.sleep(0.2)

@@ -45,7 +45,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tmp_dir()
 POLL_S = float(os.environ.get("GLOVEBOX_CLIPBOARD_POLL", "0.5"))
 KEYMAP_CHECK_S = 5.0
-LIVENESS_CHECK_S = 5.0     # xdpyinfo probe cadence; two consecutive failures = the display is gone
+LIVENESS_CHECK_S = 3.0     # xdpyinfo probe cadence; a miss confirmed 0.5 s later = the display is gone
 XCLIP_TIMEOUT = 3
 
 
@@ -280,7 +280,6 @@ def run_bridge(n, host: str, interval: float = POLL_S, log=None, host_env: dict 
     keep_keymap = not requested_layout()[0] and shutil.which("xkbcomp") and shutil.which("xmodmap")
     log(f"bridging {host} <-> {disp}: clipboard={'every %ss' % interval if clip else 'off (no xclip)'}, "
         f"keymap={'checked every %ss' % KEYMAP_CHECK_S if keep_keymap else 'not enforced'} (pid {os.getpid()})")
-    down = 0
     next_kb = 0.0
     next_live = time.time() + LIVENESS_CHECK_S
     try:
@@ -298,13 +297,11 @@ def run_bridge(n, host: str, interval: float = POLL_S, log=None, host_env: dict 
             if now >= next_live:
                 next_live = now + LIVENESS_CHECK_S
                 up = display_up(disp)
-                if up is None:            # xdpyinfo missing: cannot tell, keep serving
-                    down = 0
-                else:
-                    down = down + 1 if not up else 0
-                if down >= 2:
-                    log(f"{disp} is gone — exiting")
-                    return 0
+                if up is False:           # confirm after a moment, then go (None = xdpyinfo missing: keep serving)
+                    time.sleep(0.5)
+                    if display_up(disp) is False:
+                        log(f"{disp} is gone — exiting")
+                        return 0
             time.sleep(interval)
     finally:
         # the lock file stays (unlinking it while another bridge opens it is the classic
