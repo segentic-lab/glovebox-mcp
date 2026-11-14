@@ -43,36 +43,30 @@ your filesystem. For OS-level isolation run glovebox inside a VM or container.
 
 ## Install
 
-Pick a vision backend and run its one-liner (clone → install). Each one installs the system packages
-(auto via `apt` on Debian/Ubuntu) and the Python deps for that mode, and writes a ready-to-paste
-`mcp-config.json` with your paths.
-
-**`none`** — no local models; your agent reads screenshots itself (lightest, instant):
-
-```bash
-git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh none
-```
-
-**`basic`** — Tesseract OCR grounding (`parse_screen` → text lines + coordinates, CPU-only):
+One command. The installer probes the GPU, installs the system packages (auto via `apt` on
+Debian/Ubuntu; it prints the line for dnf/pacman), creates the Python env from `pyproject.toml`,
+downloads the vision models the machine can run, writes `mcp-config.json` **and** `.mcp.json`
+(Claude Code) with your paths, and installs the Claude Code skill:
 
 ```bash
-git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh basic
+git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh
 ```
 
-**`local`** — OmniParser on an NVIDIA GPU (`parse_screen` → text **+ icons**, pixel-precise; ~4 GB weights, ≥6 GB VRAM):
+What `auto` picks: an NVIDIA GPU with ≥ 6 GB VRAM → **`local`** (OmniParser + ScreenParser, typed
+elements; ~4 GB of downloads, `--no-screenparser` skips the 153 MB detector); otherwise
+**`basic`** (Tesseract OCR, CPU). Tesseract is installed in every mode — the server's own `auto`
+backend selection falls back to it when the GPU is busy. Force a mode with `./install.sh none|basic|local`;
+`./install.sh skill` installs only the skill; `--no-skill`, `--dev` (pytest) are the other flags.
+Re-running is safe: it only downloads what is missing.
 
-```bash
-git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh local
-```
-
-Your choice is written to `.vision-mode` (override per run with the `GLOVEBOX_VISION` env var).
-Without either, the server runs in **`auto`** and picks the best backend that is actually usable.
-`python vision.py check` prints the same diagnosis `status()` returns (GPU, weights, tesseract).
+The requested mode is written to `.vision-mode` (`auto` unless you forced one; override per run
+with the `GLOVEBOX_VISION` env var). `python vision.py check` prints the same diagnosis `status()`
+returns (GPU, weights, detector, tesseract).
 
 ### Claude Code skill
 
-`./install.sh skill` copies `skills/glovebox/SKILL.md` into `~/.claude/skills/glovebox/` — a
-skill that teaches Claude Code the observe → act → verify loop, grounding per vision mode, the
+The installer copies `skills/glovebox/SKILL.md` into `~/.claude/skills/glovebox/` when `~/.claude`
+exists (`./install.sh skill` does only that) — a skill that teaches Claude Code the observe → act → verify loop, grounding per vision mode, the
 upload and navigation gotchas, and when to stop. Claude Code loads it automatically when an agent
 is asked to drive a GUI app (or explicitly with `/glovebox`). AGENTS.md remains the long form for
 any other agent/harness.

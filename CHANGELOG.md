@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version i
 defined once in [`_version.py`](_version.py) (pyproject reads it dynamically) and
 reported to MCP clients during the initialize handshake.
 
+## [Unreleased]
+
+### Changed
+- **One-command installer**: `./install.sh` (= `auto`) probes the GPU and
+  installs the best backend the machine can run (NVIDIA ≥ 6 GB → `local`
+  with OmniParser + ScreenParser, else `basic`); tesseract is installed in
+  every mode so the server's run-time fallback has something to fall back
+  to; Python deps come from `pyproject.toml`'s extras instead of a second
+  list in the script; it writes `.mcp.json` for Claude Code next to
+  `mcp-config.json` and installs the Claude Code skill when `~/.claude`
+  exists. Flags: `--no-skill`, `--no-screenparser`, `--dev`. `.vision-mode`
+  records what was asked for (`auto` by default), not what was chosen.
+
 ## [0.5.0] - 2026-11-14
 
 ### Added
