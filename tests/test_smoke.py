@@ -422,7 +422,7 @@ def test_fill_types_nothing_when_the_focus_check_fails(monkeypatch):
     entry = {"role": "text", "name": "Ime", "rect": [100, 100, 300, 30], "editable": True, "password": False}
 
     def run(focus, why="", **kw):
-        monkeypatch.setattr(server, "_a11y_focus", lambda n: (focus, why))
+        monkeypatch.setattr(server, "_a11y_focus", lambda n, at=None: (focus, why))
         typed.clear()
         return json.loads(server.fill("abc", 200, 110, 7, **kw))
 
@@ -452,7 +452,7 @@ def test_fill_browser_focus_guard(monkeypatch):
     def fake_cdp(port, page_url_contains="", timeout=15):
         yield (lambda method, params=None: {"result": {"value": answer["v"]}}), {}, []
     monkeypatch.setattr(server, "_cdp", fake_cdp)
-    monkeypatch.setattr(server, "_a11y_focus", lambda n: pytest.fail("browsers are checked through the DOM"))
+    monkeypatch.setattr(server, "_a11y_focus", lambda n, at=None: pytest.fail("browsers are checked through the DOM"))
     answer["v"] = {"tag": "input", "value": "", "password": False}
     assert server._focus_guard(7, 5, 5, False, {}) == {"focus_checked": "browser-dom"}
     answer["v"] = {"tag": "iframe", "unknown": True}
@@ -464,6 +464,11 @@ def test_fill_browser_focus_guard(monkeypatch):
             server._focus_guard(7, 5, 5, allow, {})
         assert needle in json.loads(str(e.value))["error"]
     assert server._focus_guard(7, 5, 5, True, {})["focus_checked"] == "browser-dom"   # password, announced
+    answer["v"] = {"tag": "input", "value": "x", "at": False, "name": "ime", "rect": [10, 300, 200, 20]}
+    with pytest.raises(ToolError) as e:        # the page kept its focus elsewhere (toolbar click, focus-refusing widget)
+        server._focus_guard(7, 5, 5, False, {})
+    err = json.loads(str(e.value))
+    assert "nothing was typed" in err["error"] and err["focus"]["name"] == "ime"
 
 
 def test_label_warning_needs_a_typed_detector_and_suggests_the_input():
@@ -502,3 +507,69 @@ def test_a11y_helper_reports_missing_bindings_as_json():
     r = subprocess.run([sys.executable, "-I", server.A11Y_HELPER, "--check"], capture_output=True, text=True, timeout=30)
     d = json.loads(r.stdout)
     assert d["ok"] is True or "not importable" in d["error"]
+
+
+# ---------- found by driving real apps (Qt, LibreOffice) ----------
+def test_apps_are_told_to_use_x11_and_office_gets_its_own_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "HERE", str(tmp_path))
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "wayland")
+    env, args, base = server._app_env_args(7, "kate notes.txt")
+    # Qt follows these, not DISPLAY: with the host's Wayland values the window never appears
+    assert env["XDG_SESSION_TYPE"] == "x11" and env["QT_QPA_PLATFORM"] == "xcb"
+    assert env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] == "1" and "WAYLAND_DISPLAY" not in env
+    env, args, base = server._app_env_args(7, "libreoffice --writer doc.odt")
+    prof = [a for a in args if a.startswith("-env:UserInstallation=file://")]
+    assert len(prof) == 1 and prof[0].endswith("profiles/libreoffice-7"), "LibreOffice must not hand off to another instance"
+    env, args, base = server._app_env_args(7, "soffice -env:UserInstallation=file:///x --calc")
+    assert sum("UserInstallation" in a for a in args) == 1          # an explicit profile is respected
+
+
+def test_close_ends_the_whole_process_group_but_only_on_that_display(monkeypatch):
+    """A launcher's grandchild that survives its display (soffice.bin) must be found; a process
+    with another DISPLAY in the same group id must not."""
+    import sys
+    code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); time.sleep(60)"
+    mine = subprocess.Popen([sys.executable, "-c", code], env={**os.environ, "DISPLAY": ":77"}, start_new_session=True)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env={**os.environ, "DISPLAY": ":78"},
+                             start_new_session=True)
+    try:
+        import time
+        time.sleep(0.5)
+        server._GROUPS[77].update({mine.pid, other.pid})
+        pids = server._group_pids(77)
+        assert mine.pid in pids and len(pids) == 2 and other.pid not in pids     # parent + grandchild
+        server._kill_groups(77, server.signal.SIGKILL)
+        mine.wait(timeout=5)
+        time.sleep(0.2)
+        assert server._group_pids(77) == [] and other.poll() is None
+    finally:
+        server._GROUPS.pop(77, None)
+        for p in (mine, other):
+            try:
+                os.killpg(p.pid, 9)
+            except OSError:
+                pass
+
+
+def test_window_level_focus_is_unknown_unless_the_clicked_widget_is_editable(monkeypatch):
+    """LibreOffice reports the focus as its frame: that must not fail a click into the document,
+    and must not pass a click onto something that is not editable."""
+    monkeypatch.setattr(server, "_a11y_python", lambda: "/usr/bin/python3")
+    answers = {}
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "xprop":
+            return subprocess.CompletedProcess(cmd, 0, 'AT_SPI_BUS(STRING) = "unix:path=/x"', "")
+        assert kw["env"].get("AT_SPI_BUS_ADDRESS") == "unix:path=/x" and "DBUS_SESSION_BUS_ADDRESS" not in kw["env"]
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(answers["v"]), "")
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    frame = {"role": "frame", "name": "Writer", "rect": [0, 0, 900, 700], "editable": False, "container": True}
+    answers["v"] = {"ok": True, "focus": frame, "at_point": {"role": "paragraph", "name": "", "rect": [100, 100, 500, 20], "editable": True}}
+    f, why = server._a11y_focus(7, (200, 110))
+    assert f["role"] == "paragraph" and f["via"] == "at-point"
+    answers["v"] = {"ok": True, "focus": frame, "at_point": {"role": "label", "name": "Ime", "rect": [1, 1, 5, 5], "editable": False}}
+    f, why = server._a11y_focus(7, (2, 2))
+    assert f is None and "frame" in why and "label" in why
+    answers["v"] = {"ok": True, "focus": frame}
+    assert server._a11y_focus(7, (2, 2))[0] is None

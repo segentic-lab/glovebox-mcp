@@ -8,6 +8,40 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+Found by driving real apps (a browser form with 35 cases; GTK, Qt and Tk test
+forms; Kate, LibreOffice Writer/Calc, GIMP, Inkscape) through the MCP interface.
+
+### Fixed
+- **Qt/KDE apps ignored every key press** (agent and person) since 0.4.0. The
+  host-keymap copy set only the core keyboard properly; the XTEST keyboard
+  (xdotool) and Xephyr's own keyboard were left with a map the X server could
+  not serialise, the core keyboard adopted it on the first injected key, and
+  xkbcommon clients gave up ("qt.qpa.xkeyboard: failed to compile a keymap").
+  The keymap is now uploaded to every keyboard device.
+- **Qt/KDE apps never showed a window on a Wayland host**: Qt follows
+  `XDG_SESSION_TYPE` / `QT_QPA_PLATFORM`, not `DISPLAY`. Launched apps now get
+  `XDG_SESSION_TYPE=x11`, `QT_QPA_PLATFORM=xcb` (plus SDL/Clutter/Mozilla
+  equivalents) and Qt's accessibility switches.
+- **LibreOffice opened outside the sandbox or not at all**: it is
+  single-instance per profile, so a launch was handed to a LibreOffice already
+  running on the host or left over from a closed instance. Each instance now
+  gets its own profile (`profiles/libreoffice-<N>`).
+- **`close_instance` left processes behind** (LibreOffice's `soffice.bin`
+  survives its display). Apps start in their own process group and the whole
+  group on that display is ended on close.
+- `fill` in a browser typed into a field elsewhere on the page when the click
+  hit the browser's toolbar or an element that refuses focus; it now fails
+  with nothing typed when the focused field is not at the clicked point
+  (clicking a `<label for>` still fills its input).
+- `fill` refused the document area of LibreOffice Writer: the app reports the
+  focus only as its window frame. A window-level focus is now accepted when
+  the widget at the clicked point is editable, and reported as unknown
+  (`focus_checked: false`) otherwise — never as a miss.
+- Qt leaves the focused flag on a combo box's current item; with several
+  widgets claiming focus the one under the click is used.
+- `fill`'s read-back marker could reach the host clipboard through the bridge;
+  the bridge never mirrors it.
+
 ## [0.6.0] - 2026-11-14
 
 ### Added

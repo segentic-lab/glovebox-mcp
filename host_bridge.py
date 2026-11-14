@@ -107,17 +107,44 @@ def keymap_signature(disp: str, env: dict = None):
     return " ".join(a.stdout.split()) + "|" + " ".join(b.stdout.split())
 
 
+KEYBOARD_DEVICE_IDS = range(2, 16)   # XInput device ids probed for keyboards (Xephyr: 3 master, 5 XTEST, 6 its own)
+
+
 def copy_keymap(disp: str, host: str, host_env: dict) -> str:
-    """xkbcomp HOST DISP. Returns '' on success, else the reason."""
+    """Give EVERY keyboard device of DISP the host's keymap. Returns '' on success, else the reason.
+
+    `xkbcomp HOST DISP` alone only sets the core (master) keyboard properly; the slave devices —
+    the XTEST keyboard xdotool types through and Xephyr's own keyboard a person types through —
+    are left with a keymap the server can no longer serialise (BadAtom). The master then adopts
+    that broken map the moment a slave sends a key, and every toolkit that reads the keymap
+    through xkbcommon (Qt, SDL) fails to compile it and drops ALL key presses ("qt.qpa.xkeyboard:
+    failed to compile a keymap"): no typing in Qt/KDE apps, for the agent or a person. So the map
+    is dumped once and uploaded to the core keyboard and then to each keyboard device by id."""
     if not shutil.which("xkbcomp"):
         return "xkbcomp is not installed (package x11-xkb-utils)"
+    path = os.path.join(tmp_dir(), f"keymap_{os.getpid()}_{disp.strip(':').replace('.', '_')}.xkb")
     try:
         # the geometry warnings xkbcomp prints on Xwayland hosts are harmless (fonts/colours of
         # the on-screen keyboard picture), hence -w 0
-        r = _run(["xkbcomp", "-w", "0", host, disp], host_env, timeout=20)
+        r = _run(["xkbcomp", "-w", "0", host, path], host_env, timeout=20)
+        if r.returncode != 0:
+            return f"xkbcomp could not read the keymap of {host}: {(r.stderr or '').strip()[:120]}"
+        r = _run(["xkbcomp", "-w", "0", path, disp], host_env, timeout=20)
+        if r.returncode != 0:
+            return f"xkbcomp {host} {disp} failed: {(r.stderr or '').strip()[:120]}"
+        for dev in KEYBOARD_DEVICE_IDS:
+            d = _run(["xkbcomp", "-w", "0", "-i", str(dev), path, disp], host_env, timeout=20)
+            # pointers answer XkbBadKeyboard; an id past the last device answers a plain X error
+            if d.returncode != 0 and "XkbBadKeyboard" not in (d.stderr or ""):
+                break
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"xkbcomp failed: {e!r}"
-    return "" if r.returncode == 0 else f"xkbcomp {host} {disp} failed: {(r.stderr or '').strip()[:120]}"
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return ""
 
 
 def apply_keymap(disp: str, host: str, host_env: dict = None) -> dict:
@@ -184,6 +211,11 @@ def write_clipboard(env: dict, text: str) -> bool:
         return False
 
 
+# fill()'s read-back parks a marker with this prefix on the instance clipboard for ~0.3 s; it must
+# never be mirrored to the host (where it would replace what the person had copied)
+PRIVATE_PREFIX = "glovebox-private-"
+
+
 class ClipboardSync:
     """One step = read both sides, propagate the side that changed. The IO is injectable so the
     policy is testable without an X server.
@@ -203,6 +235,8 @@ class ClipboardSync:
     def step(self) -> str:
         """Returns what happened: 'seed' | 'to_host' | 'to_instance' | 'idle'."""
         h, i = self.read_host(), self.read_inst()
+        if (i or "").startswith(PRIVATE_PREFIX):
+            return "idle"         # the server's own marker, about to be replaced — never the person's business
         if not self.seeded:
             self.seeded = True
             if h is not None:

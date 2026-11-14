@@ -103,6 +103,13 @@ in one call.
   `false` = the field changed the value (`value`); `null` = unreadable. When `fill` fails it
   names what has the focus (`focus: {role, name, rect}`) — click inside that `rect` or pick
   another target; with ScreenParser, `suggest_element` names the input next to a label.
+- **Native apps that fork into the background lose their D-Bus session** and with it the
+  accessibility bus (`focus_checked: false`). Start them in the foreground when they have a flag
+  for it: `launch_app("kate -b")`. LibreOffice, GTK and plain Qt apps need nothing.
+- **Spreadsheet cells and rich documents**: `fill` works on LibreOffice Writer's page and on a
+  Calc cell, but for cell-by-cell entry `click` → `type_text(…, submit=True)` is the natural flow.
+  `<input type=date>` wants the digits in the browser's locale order — check `value` when
+  `verified` is false.
 - **See only what changed** — `observe_region="x,y,w,h"` on any action returns just that
   rectangle (implies `observe="screenshot"`); use it for the field you just edited.
 - **`warnings` about the pointer** mean a person (or another agent) moved the mouse in your

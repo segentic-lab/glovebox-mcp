@@ -314,6 +314,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
 - `_paths.py` — shared helpers: the 0700 per-user temp dir, display naming, the liveness probe.
 - `skills/glovebox/SKILL.md` — a Claude Code skill that teaches an agent the workflow (`./install.sh skill` installs it).
+- Launched apps are told to draw on the instance's X display (`XDG_SESSION_TYPE=x11`, `QT_QPA_PLATFORM=xcb`), LibreOffice gets a per-instance profile (`profiles/libreoffice-<N>`) so it cannot hand a document to a LibreOffice on the host, and `close_instance` ends the whole process group it started.
 - `a11y_focus.py` — AT-SPI helper for `fill()`'s focus check; runs under the system `python3` (needs `python3-gi`, `gir1.2-atspi-2.0`, `at-spi2-core` — `install.sh` adds them; without them `fill` still works and reports `focus_checked: false`).
 - `host_bridge.py` — per-instance host bridge: host keymap copy (AltGr fix) + clipboard mirroring (`keymap` / `serve` / `spawn` / `status` CLI).
 - `install.sh` — mode-aware installer (`none` / `basic` / `local`).

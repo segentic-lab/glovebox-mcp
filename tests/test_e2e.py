@@ -687,3 +687,61 @@ def test_fill_checks_the_focus_of_a_native_app(x99, tmp_path):
             finally:
                 await s.call_tool("close_instance", {"instance": n})
     asyncio.run(run())
+
+
+def _xkbcommon_accepts(display, press_key_env=None):
+    """{device id: bool} for the keyboard devices of `display`, as xkbcommon-x11 sees them (what
+    Qt and SDL use). None when the libraries are not installed."""
+    import ctypes
+    try:
+        xcb, xkb, x11 = ctypes.CDLL("libxcb.so.1"), ctypes.CDLL("libxkbcommon.so.0"), ctypes.CDLL("libxkbcommon-x11.so.0")
+    except OSError:
+        return None
+    xcb.xcb_connect.restype = ctypes.c_void_p
+    xcb.xcb_connect.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    xcb.xcb_disconnect.argtypes = [ctypes.c_void_p]
+    xkb.xkb_context_new.restype = ctypes.c_void_p
+    xkb.xkb_context_set_log_level.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    x11.xkb_x11_setup_xkb_extension.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_int] + [ctypes.c_void_p] * 4
+    x11.xkb_x11_get_core_keyboard_device_id.argtypes = [ctypes.c_void_p]
+    x11.xkb_x11_keymap_new_from_device.restype = ctypes.c_void_p
+    x11.xkb_x11_keymap_new_from_device.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int]
+    c = xcb.xcb_connect(display.encode(), None)
+    try:
+        if not x11.xkb_x11_setup_xkb_extension(c, 1, 0, 0, None, None, None, None):
+            return None
+        core = x11.xkb_x11_get_core_keyboard_device_id(c)
+        ctx = xkb.xkb_context_new(0)
+        xkb.xkb_context_set_log_level(ctx, 10)     # the pointer devices we probe are expected to fail
+        return {"core": bool(x11.xkb_x11_keymap_new_from_device(ctx, c, core, 0)),
+                "valid": sum(bool(x11.xkb_x11_keymap_new_from_device(ctx, c, d, 0)) for d in range(2, 12))}
+    finally:
+        xcb.xcb_disconnect(c)
+
+
+@pytest.mark.skipif(not (shutil.which("Xephyr") and HAS_XMESSAGE and shutil.which("xkbcomp")),
+                    reason="Xephyr, xmessage or xkbcomp not installed")
+def test_copied_keymap_stays_valid_for_xkbcommon_after_typing(x99):
+    """Qt/SDL read the keymap through xkbcommon. The host-keymap copy used to leave the XTEST and
+    Xephyr keyboards with an unreadable map; the first injected key then broke the core keyboard
+    too and Qt apps ignored every key press."""
+    if _xkbcommon_accepts(f":{DISP}") is None:
+        pytest.skip("libxkbcommon-x11 not available")
+
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
+            p = payload(await s.call_tool("launch_app", {"command": "xmessage -center keymap", "size": "400x300"}))
+            n = p["instance"]
+            try:
+                if p["keyboard"]["method"] != "host-keymap":
+                    pytest.skip(f"keymap not copied here: {p['keyboard']}")
+                before = _xkbcommon_accepts(f":{n}")
+                assert before["core"] and before["valid"] >= 3, before       # master + XTEST + Xephyr keyboards
+                r = await s.call_tool("press_keys", {"keys": "shift", "instance": n})
+                assert not r.is_error
+                await asyncio.sleep(0.3)
+                after = _xkbcommon_accepts(f":{n}")
+                assert after["core"] and after["valid"] >= 3, after
+            finally:
+                await s.call_tool("close_instance", {"instance": n})
+    asyncio.run(run())

@@ -90,6 +90,8 @@ A11Y_HELPER = os.path.join(HERE, "a11y_focus.py")
 A11Y_APT = "sudo apt install at-spi2-core gir1.2-atspi-2.0 python3-gi"
 FOCUS_SLACK = 8  # px: toolkits accept clicks slightly outside the rectangle they report over AT-SPI
 _PTR = {}        # N -> (x, y) where THIS server last left the pointer (foreign-input detection)
+_GROUPS = defaultdict(set)   # N -> process groups this server started on that display (killed on close)
+OFFICE = ("libreoffice", "soffice", "lowriter", "localc", "loimpress", "lodraw", "lobase", "lomath")
 _LOCK = threading.RLock()
 _ILOCKS = defaultdict(threading.RLock)   # per-instance: one cursor/keyboard/clipboard = one sequence at a time
 _SCAN_MAX = 24   # highest display :N that list_instances probes for already-running sandboxes
@@ -572,14 +574,55 @@ def _terminate(info: dict):
             pass
 
 
+def _group_pids(n) -> list:
+    """Live processes that belong to a process group this server started for instance n AND
+    still have DISPLAY=:n in their environment — both conditions, so a recycled group id can
+    never point the kill at an unrelated process."""
+    groups = _GROUPS.get(int(n)) or set()
+    if not groups:
+        return []
+    want = f"DISPLAY={_disp(n)}".encode()
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as fh:
+                pgrp = int(fh.read().rsplit(b")", 1)[1].split()[2])
+            if pgrp not in groups:
+                continue
+            with open(f"/proc/{name}/environ", "rb") as fh:
+                if want in fh.read().split(b"\0"):
+                    out.append(int(name))
+        except (OSError, ValueError, IndexError):
+            continue
+    return out
+
+
+def _kill_groups(n, sig):
+    for pid in _group_pids(n):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
 def _close(n) -> bool:
-    """Kill app + Xephyr of instance n; True when the display is down afterwards."""
+    """Kill the apps + Xephyr of instance n; True when the display is down afterwards. Apps are
+    ended as whole process groups: some survive the loss of their display (LibreOffice's
+    soffice.bin kept running, and every later `libreoffice` launch handed its document to that
+    windowless leftover instead of opening a window)."""
     info = INSTANCES.get(n)
+    _kill_groups(n, signal.SIGTERM)
     if info:
         _terminate(info)
     _kill_xephyr(n)
     if _up(n):
         return False
+    if _group_pids(n):
+        time.sleep(0.5)
+        _kill_groups(n, signal.SIGKILL)     # the display is gone; whatever ignored SIGTERM has no purpose left
+    _GROUPS.pop(int(n), None)
     _forget(n)
     return True
 
@@ -627,6 +670,13 @@ def _app_env_args(n, command):
     if not args:
         raise ValueError("empty command")
     base = os.path.basename(args[0])
+    # The host session is often Wayland; every toolkit must be told to draw on THIS X display.
+    # Qt goes by XDG_SESSION_TYPE / QT_QPA_PLATFORM, not by DISPLAY: with the host's values it
+    # picks its Wayland backend and — WAYLAND_DISPLAY being removed — never shows a window
+    # (Kate, any PyQt/KDE app stayed a black screen). The accessibility switches make Qt
+    # register on the instance's AT-SPI bus without a screen reader running (fill's focus check).
+    appenv.update(XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb", SDL_VIDEODRIVER="x11", CLUTTER_BACKEND="x11",
+                  MOZ_ENABLE_WAYLAND="0", QT_ACCESSIBILITY="1", QT_LINUX_ACCESSIBILITY_ALWAYS_ON="1")
     if base in BROWSERS:
         appenv.pop("WAYLAND_DISPLAY", None)
         appenv["GDK_BACKEND"] = "x11"
@@ -650,6 +700,13 @@ def _app_env_args(n, command):
     else:
         appenv.pop("WAYLAND_DISPLAY", None)
         appenv.setdefault("GDK_BACKEND", "x11")
+        if base in OFFICE and "UserInstallation" not in command:
+            # LibreOffice is single-instance per PROFILE: without its own, the launch is handed to
+            # a LibreOffice already running — on the host desktop or another instance — and the
+            # document opens THERE, outside this sandbox.
+            prof = os.path.join(HERE, "profiles", f"libreoffice-{n}")
+            os.makedirs(prof, exist_ok=True)
+            args.append(f"-env:UserInstallation=file://{prof}")
         if shutil.which("dbus-run-session"):
             args = ["dbus-run-session", "--"] + args
     return appenv, args, base
@@ -664,7 +721,11 @@ def _spawn_checked(n, args, appenv, logpath, fix_hint, append=False):
         return None, f"command not found: {real}", fix_hint
     try:
         with open(logpath, "ab" if append else "wb") as lf:
-            proc = subprocess.Popen(args, env=appenv, stdout=subprocess.DEVNULL, stderr=lf)
+            # its own session = its own process group: close_instance can then end the whole tree
+            # (dbus-run-session -> launcher script -> the real binary), not just the first pid
+            proc = subprocess.Popen(args, env=appenv, stdout=subprocess.DEVNULL, stderr=lf,
+                                    start_new_session=True)
+        _GROUPS[int(n)].add(proc.pid)
     except FileNotFoundError:
         return None, f"command not found: {args[0]}", fix_hint
     except OSError as e:
@@ -1234,6 +1295,39 @@ _FOCUS_JS = r"""(function() {
 })()"""
 
 
+_FOCUS_AT_JS = r"""(function(X, Y) {
+  var e = document.activeElement;
+  while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement;
+  if (!e) return null;
+  var tag = e.tagName.toLowerCase(), out = {tag: tag};
+  if (tag === "iframe") return {tag: tag, unknown: true};
+  if (tag === "input" || tag === "textarea") { out.value = String(e.value); out.password = (e.type || "").toLowerCase() === "password"; }
+  else if (e.isContentEditable) out.value = String(e.innerText);
+  if (out.value === undefined) return out;
+  var z = window.devicePixelRatio || 1;
+  var side = Math.max(0, (window.outerWidth - window.innerWidth * z) / 2);
+  var top = Math.max(0, window.outerHeight - window.innerHeight * z - side);
+  var vx = (X - window.screenX - side) / z, vy = (Y - window.screenY - top) / z, S = 8 / z;
+  var r = e.getBoundingClientRect();
+  var at = vx >= r.left - S && vx < r.right + S && vy >= r.top - S && vy < r.bottom + S;
+  if (!at && vx >= 0 && vy >= 0 && vx < window.innerWidth && vy < window.innerHeight) {
+    var p = document.elementFromPoint(vx, vy);
+    while (p && p.shadowRoot) { var i = p.shadowRoot.elementFromPoint(vx, vy); if (!i || i === p) break; p = i; }
+    if (p) {
+      var lab = p.closest ? p.closest("label") : null, pr = p.getBoundingClientRect();
+      at = p === e || e.contains(p) || (lab && lab.control === e)
+        || (p.contains(e) && p !== document.body && p !== document.documentElement
+            && pr.height <= Math.max(120, r.height * 4));
+    }
+  }
+  out.at = !!at;
+  out.name = String(e.getAttribute("aria-label") || e.name || e.id || e.placeholder || "").slice(0, 60);
+  out.rect = [Math.round(window.screenX + side + r.left * z), Math.round(window.screenY + top + r.top * z),
+              Math.round(r.width * z), Math.round(r.height * z)];
+  return out;
+})"""
+
+
 def _hit(n, x, y):
     """What is under (x, y) BEFORE a click, for a Chromium-family browser on this instance:
     {role, name, tag, checked_before?, disabled?, href?, source} from the page's DOM, or
@@ -1509,7 +1603,7 @@ def _a11y_python():
     return found
 
 
-def _a11y_focus(n):
+def _a11y_focus(n, at=None):
     """(focus | None, why): the widget with keyboard focus on instance n, asked from THAT
     display's accessibility bus (its address is a property of the display's root window; the
     host's session bus is removed from the helper's environment so the host's focus can never be
@@ -1526,7 +1620,8 @@ def _a11y_focus(n):
             return None, "no accessibility bus on this display (the app does not speak AT-SPI)"
         env = {**_env(n), "AT_SPI_BUS_ADDRESS": m.group(1)}
         env.pop("DBUS_SESSION_BUS_ADDRESS", None)
-        out = subprocess.run([py, "-I", A11Y_HELPER], env=env, capture_output=True, text=True, timeout=5)
+        out = subprocess.run([py, "-I", A11Y_HELPER] + ([str(int(at[0])), str(int(at[1]))] if at else []),
+                             env=env, capture_output=True, text=True, timeout=5)
         d = json.loads(out.stdout or "{}")
     except Exception as e:
         return None, f"the accessibility lookup failed ({type(e).__name__})"
@@ -1534,7 +1629,16 @@ def _a11y_focus(n):
         return None, f"the accessibility lookup failed ({str(d.get('error'))[:120]})"
     if not d.get("focus"):
         return None, "the app exposes no focused widget over AT-SPI (canvas, game or Xlib-only app)"
-    return d["focus"], ""
+    f = d["focus"]
+    if f.get("container"):
+        # the app only says "the focus is in this window" (LibreOffice). If the widget it reports
+        # AT the clicked point is editable, that is where the keys go; anything else is unknown.
+        ap = d.get("at_point") or {}
+        if ap.get("editable"):
+            return {**ap, "via": "at-point"}, ""
+        return None, (f"the app reports the focus only as its {f.get('role')} — not which widget inside it"
+                      + (f" (at the point: {ap.get('role')} '{(ap.get('name') or '')[:30]}')" if ap else ""))
+    return f, ""
 
 
 def _focus_guard(n, x, y, allow_password, extra) -> dict:
@@ -1547,7 +1651,8 @@ def _focus_guard(n, x, y, allow_password, extra) -> dict:
     v = None
     try:
         with _cdp(_cdp_port(n), timeout=3) as (cmd, _target, _pages):
-            v = cmd("Runtime.evaluate", {"expression": _FOCUS_JS, "returnByValue": True}).get("result", {}).get("value")
+            v = cmd("Runtime.evaluate", {"expression": f"{_FOCUS_AT_JS}({int(x)},{int(y)})",
+                                         "returnByValue": True}).get("result", {}).get("value")
     except Exception:
         pass
     if isinstance(v, dict):
@@ -1558,14 +1663,26 @@ def _focus_guard(n, x, y, allow_password, extra) -> dict:
                           f"at ({x},{y}) missed; nothing was typed",
                   fix="screenshot / find_elements to locate the field, then fill() again; for a custom widget "
                       "use click + type_text", instance=n, **extra)
+        if v.get("at") is False:
+            # the page kept its focus: the click hit the browser's own toolbar, or an element that
+            # refuses focus — typing now would land in a field somewhere else on the page
+            focus = {"role": v.get("tag"), "name": v.get("name"), "rect": v.get("rect")}
+            _fail("fill", f"the click at ({x},{y}) did not put the focus there: it is on the <{v.get('tag')}>"
+                          + (f" '{v['name']}'" if v.get("name") else "") + f" at {v.get('rect')} (x,y,w,h), which is not "
+                          "at that point — nothing was typed",
+                  fix="for the address bar use browser(action='navigate'); for a page field, screenshot / "
+                      "find_elements to locate it; for a custom widget use click + type_text",
+                  instance=n, focus=focus, **extra)
         if v.get("password") and not allow_password:
             _fail("fill", f"the field focused by the click at ({x},{y}) is a password field — nothing was typed",
                   fix=pw_fix, instance=n, **extra)
         return {"focus_checked": "browser-dom"}
-    f, why = _a11y_focus(n)
+    f, why = _a11y_focus(n, (x, y))
     if f is None:
         return {"focus_checked": False, "focus_unchecked_reason": why}
     focus = {"role": f.get("role"), "name": f.get("name"), "rect": f.get("rect")}
+    if f.get("via"):
+        focus["via"] = f["via"]     # weaker evidence: the editable widget under the click, focus in its window
     what = f"{focus['role']}" + (f" '{focus['name']}'" if focus["name"] else "")
     if not f.get("editable"):
         _fail("fill", f"after the click the keyboard focus is on a {what}, not an editable field — the click at "
@@ -1648,7 +1765,7 @@ def _read_field(n, action):
         pass
     if not shutil.which("xclip"):
         return None, "unreadable", None
-    sentinel = f"glovebox-fill-{os.getpid()}-{time.time_ns()}"
+    sentinel = f"{host_bridge.PRIVATE_PREFIX}{os.getpid()}-{time.time_ns()}"
     try:
         prev, _err = _xclip_read(n, action)
         _xclip(n, action, "-i", input=sentinel.encode())

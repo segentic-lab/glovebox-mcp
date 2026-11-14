@@ -81,3 +81,15 @@ def test_lock_probe_without_bridge(tmp_path, monkeypatch):
     assert hb.running(42) is False
     assert hb.lock_path(42) == os.path.join(str(tmp_path), "bridge_42.lock")
     assert hb.lock_path(":7").endswith("bridge_7.lock")
+
+
+def test_private_marker_is_never_mirrored_to_the_host():
+    """fill()'s read-back marker must not replace what the person copied on the host."""
+    host, inst, writes = {"v": "user text"}, {"v": "user text"}, []
+    sync = hb.ClipboardSync(lambda: host["v"], lambda: inst["v"],
+                                     lambda t: writes.append(("host", t)), lambda t: writes.append(("inst", t)))
+    assert sync.step() == "idle"
+    inst["v"] = hb.PRIVATE_PREFIX + "123"
+    assert sync.step() == "idle" and writes == []
+    inst["v"] = "copied in the app"
+    assert sync.step() == "to_host" and writes == [("host", "copied in the app")]
