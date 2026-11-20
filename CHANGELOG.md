@@ -8,6 +8,8 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-20
+
 Reported by an agent that lost its MCP connection three times in one session while
 reading ad-platform data with `browser(action="eval")`.
 
