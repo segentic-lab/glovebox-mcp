@@ -573,3 +573,53 @@ def test_window_level_focus_is_unknown_unless_the_clicked_widget_is_editable(mon
     assert f is None and "frame" in why and "label" in why
     answers["v"] = {"ok": True, "focus": frame}
     assert server._a11y_focus(7, (2, 2))[0] is None
+
+
+def test_unpaired_surrogates_never_reach_the_wire():
+    """Half an emoji in a tool result (a JS string cut with slice(), a clipboard fragment) is not
+    encodable as UTF-8: it used to crash the stdout writer and close the MCP connection."""
+    out = server._ok("browser", None, result="half \ud83d ok \U0001F600", title="\udc00")
+    out.encode("utf-8")                      # must not raise
+    d = json.loads(out)
+    assert d["result"] == "half � ok \U0001F600" and d["title"] == "�"
+    assert d["text_repaired"].startswith("2 ")
+    assert "text_repaired" not in json.loads(server._ok("browser", None, result="čšž \U0001F600"))
+    with pytest.raises(ToolError) as e:
+        server._fail("browser", "the script threw: \ud83d")
+    str(e.value).encode("utf-8")
+
+
+def _fake_browser(monkeypatch, evaluate):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_cdp(port, page_url_contains="", timeout=15):
+        yield (lambda method, params=None, wait=None: evaluate(params or {}, wait)), {"url": "u", "title": "t"}, []
+    monkeypatch.setattr(server, "_cdp", fake_cdp)
+    monkeypatch.setattr(server, "_require", lambda action, instance: 3)
+
+
+def test_browser_eval_timeout_fails_cleanly_and_says_the_script_runs_on(monkeypatch):
+    seen = {}
+
+    def evaluate(params, wait):
+        seen["wait"] = wait
+        raise server.CdpTimeout("Runtime.evaluate: no reply within 5 s")
+    _fake_browser(monkeypatch, evaluate)
+    with pytest.raises(ToolError) as e:
+        server.browser(action="eval", instance=3, js="slow()", timeout_s=5)
+    d = json.loads(str(e.value))
+    assert seen["wait"] == 5 and d["timed_out"] is True
+    assert "keeps running" in d["error"] and "timeout_s" in d["fix"] and "window.__r" in d["fix"]
+    for bad in (0, 601):
+        with pytest.raises(ToolError, match="out of range"):
+            server.browser(action="eval", instance=3, js="1", timeout_s=bad)
+
+
+def test_browser_eval_result_is_capped_and_flagged(monkeypatch):
+    _fake_browser(monkeypatch, lambda params, wait: {"result": {"value": ["x" * 50] * 10_000}})
+    d = json.loads(server.browser(action="eval", instance=3, js="big"))
+    assert d["truncated"] is True and "result" not in d
+    assert len(d["result_json"]) == server.EVAL_MAX and d["length"] > server.EVAL_MAX and "max_chars" in d["fix"]
+    d = json.loads(server.browser(action="eval", instance=3, js="big", max_chars=1_000_000))
+    assert len(d["result"]) == 10_000 and "truncated" not in d

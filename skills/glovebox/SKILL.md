@@ -71,6 +71,8 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 | Keys, shortcuts, sequences | `press_keys("ctrl+l", instance)` · `press_keys("ctrl+a Delete")` — validated before pressing |
 | Exact text out of the app | select (drag / `ctrl+a`) → `press_keys("ctrl+c")` → `clipboard(action="get")` — no OCR |
 | Browser URL / navigate / page text | `browser(action="info" / "navigate" / "text" / "eval", instance, url=…, js=…)` |
+| Long or big page script | `browser("eval", js=…, timeout_s=120, max_chars=…)` — on `timed_out` the script keeps running: store on `window.__r`, poll with short evals; `truncated: true` = return less |
+| DOM rect → click point | `browser("info").viewport` → `x = left + css_x*dpr`, `y = top + css_y*dpr` |
 | Upload a file to a web form | `upload_file("/path/or/relative", instance)` — **never** click an upload button expecting a dialog (invisible, hangs the renderer) |
 | Hand the sandbox a file you made | `put_file("data.csv", "…", instance)` (binary: `encoding="base64"`), then `open_file`/`upload_file` it by name |
 | Open a file in a native app | `open_file("doc.odt", instance, app="libreoffice")` — relative paths are in `files/<N>/` (`list_files`) |

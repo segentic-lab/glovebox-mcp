@@ -70,6 +70,9 @@ in one call.
 | Set a form field (click + focus check + replace + read back) | `fill("Nadja Kovačič", x, y, instance)` or `fill("…", element=<id>)` — a miss or an unannounced password field fails with nothing typed; passwords need `allow_password=True` |
 | Type into the focused field | `type_text("…", instance)` — unicode-safe automatically; `clear=True` replaces, `submit=True` adds Return |
 | Browser: URL, navigate, page text, JS | `browser(action="info"/"navigate"/"text"/"eval", instance, url=…, js=…)` — exact, no OCR |
+| Long page script (fetch loops) | `browser("eval", js=…, timeout_s=120)` (max 600). On `timed_out` the script keeps running: start it un-awaited (`js="work().then(r => { window.__r = r }); 'started'"`) and poll `js="window.__r"` |
+| Big eval result | over `max_chars` (default 100000, max 1000000) you get `truncated: true` + `result_json` (a cut string) instead of `result` — return less (slice/map) or raise `max_chars` |
+| DOM rect → click coordinates | `browser("info").viewport`: `x = left + css_x*dpr`, `y = top + css_y*dpr` (zoomed pages have `dpr` ≠ 1; `top` is the toolbar) |
 | Switch windows / dialogs, resize, close | `window_info(instance)` → `manage_window("activate"/"close"/"resize", instance, window_id)` |
 | Second app on the same instance | `start_app("gimp", instance)` |
 | Keys / shortcuts / sequences | `press_keys("Return" / "ctrl+a" / "ctrl+a Delete", instance)` |

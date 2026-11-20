@@ -8,6 +8,36 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+Reported by an agent that lost its MCP connection three times in one session while
+reading ad-platform data with `browser(action="eval")`.
+
+### Fixed
+- **A tool result containing half an emoji no longer kills the connection.** A string
+  with an unpaired UTF-16 surrogate (a JS string cut with `slice()`, a clipboard
+  fragment, a window title) cannot be encoded as UTF-8; serialising the reply crashed
+  the server's stdout writer, the call never returned and every later call failed with
+  "Connection closed" until `/mcp`. All tool replies now replace such characters with
+  U+FFFD and say so in `text_repaired`. (The size of the result was not the cause:
+  3 MB results returned in 1 s before and after.)
+- `browser(action="eval")` no longer gives up after a fixed 15 s with a fix line about
+  the browser not being Chromium. The timeout is now a parameter, bounds the whole
+  reply rather than each socket read, and the failure says the script keeps running
+  and how to poll for its result.
+
+### Added
+- `browser(timeout_s=…)` — 1–600 s for an eval or text call (default 30). A timeout
+  fails with `timed_out: true`; the connection stays usable.
+- `browser(action="eval")` caps the result at `max_chars` (default 100000, max
+  1000000) characters of JSON: larger results return `truncated: true`, `length` and
+  the cut `result_json` instead of `result`.
+- `browser(action="info")` returns `viewport` (`dpr`, `left`, `top`, `css_width`,
+  `css_height`), the transform from the page's CSS pixels to click/screenshot pixels.
+
+### Changed
+- `browser(max_chars)` defaults to 0 = the per-action default (20000 for `text`,
+  100000 for `eval`); eval results above 100000 characters, previously unlimited, now
+  need an explicit `max_chars`.
+
 ## [0.6.1] - 2026-11-15
 
 Found by driving real apps (a browser form with 35 cases; GTK, Qt and Tk test

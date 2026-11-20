@@ -102,6 +102,7 @@ FILES_MAX = 200  # list_files entry cap per call (flagged via "truncated")
 WINDOWS_MAX = 50  # window_info visible-window cap
 CLIP_MAX = 100_000  # clipboard(get) characters per call (flagged via "truncated")
 TEXT_MAX = 20_000   # browser(action='text') characters per call
+EVAL_MAX = 100_000  # browser(action='eval') characters of result JSON per call
 PUT_MAX = 10 * 1024 * 1024   # put_file bytes per call
 SETTLE_MAX_MS = 5000
 WAIT_MAX_MS = 10000
@@ -166,13 +167,30 @@ def _parse_local(img, box_threshold, ann, instance):
 
 
 # ---------- response contract ----------
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _dumps(payload: dict) -> str:
+    """json.dumps for everything that leaves a tool. A str holding an unpaired UTF-16 surrogate
+    (half an emoji: a JS string cut with slice(), a clipboard fragment, a window title) cannot be
+    encoded as UTF-8 — it used to kill the server's stdout writer, and with it the whole MCP
+    connection, on the reply. Such characters become U+FFFD and the reply says how many."""
+    out = json.dumps(payload, ensure_ascii=False)
+    bad = len(_LONE_SURROGATE.findall(out))
+    if bad:
+        payload = {**payload, "text_repaired": f"{bad} unpaired UTF-16 surrogate(s) (half of an emoji or "
+                                               "other astral character) replaced with U+FFFD"}
+        out = _LONE_SURROGATE.sub("\ufffd", json.dumps(payload, ensure_ascii=False))
+    return out
+
+
 def _res(ok: bool, action: str, instance=None, **kw) -> str:
     out = {"ok": ok, "action": action}
     if instance is not None:
         out["instance"] = int(instance)
         out["display"] = _disp(instance)
     out.update(kw)
-    return json.dumps(out, ensure_ascii=False)
+    return _dumps(out)
 
 
 def _ok(action: str, instance=None, **kw) -> str:
@@ -478,6 +496,10 @@ def _cdp_pages(port, timeout=5):
             and not t.get("url", "").startswith("devtools://")]
 
 
+class CdpTimeout(RuntimeError):
+    """The browser did not answer one CDP command in time (the page script may still be running)."""
+
+
 @contextmanager
 def _cdp(port, page_url_contains="", timeout=15):
     """A CDP session on one page target of the browser listening on 127.0.0.1:port. Yields
@@ -497,12 +519,22 @@ def _cdp(port, page_url_contains="", timeout=15):
     ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=timeout, suppress_origin=True)
     seq = {"n": 0}
 
-    def cmd(method, params=None):
+    def cmd(method, params=None, wait=None):
+        """`wait` = seconds this one command may take (default: the session timeout). It is a
+        deadline for the whole reply, not per socket read, so a chatty page cannot extend it."""
         seq["n"] += 1
         mid = seq["n"]
+        deadline = time.monotonic() + (wait or timeout)
         ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
         while True:
-            msg = json.loads(ws.recv())
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise CdpTimeout(f"{method}: no reply within {wait or timeout:g} s")
+            ws.settimeout(left)
+            try:
+                msg = json.loads(ws.recv())
+            except websocket.WebSocketTimeoutException:
+                raise CdpTimeout(f"{method}: no reply within {wait or timeout:g} s") from None
             if msg.get("id") == mid:
                 if "error" in msg:
                     raise RuntimeError(f"{method}: {msg['error'].get('message')}")
@@ -1082,14 +1114,14 @@ def _observe(instance, mode, settle_ms, payload: dict):
                        min(box[2], img.width), min(box[3], img.height))
                 img = img.crop(box)
                 payload["observed_region"] = list(box)
-            return [json.dumps(payload, ensure_ascii=False), _encode(img)]
+            return [_dumps(payload), _encode(img)]
         if mode == "parse":
             pr = _do_parse(instance)
             for k in ("ok", "action", "instance"):
                 pr.pop(k, None)
             payload["observed"] = "parse"
             payload["parse"] = pr
-            out = [json.dumps(payload, ensure_ascii=False)]
+            out = [_dumps(payload)]
             ann = _annotated(instance)
             if pr.get("elements") is not None and os.path.exists(ann):
                 with open(ann, "rb") as fh:
@@ -1102,7 +1134,7 @@ def _observe(instance, mode, settle_ms, payload: dict):
         if err.get("fix"):
             payload["observe_fix"] = err["fix"]
         payload["note"] = f"the {payload['action']} itself was performed; only the {mode} after it failed"
-    return json.dumps(payload, ensure_ascii=False)
+    return _dumps(payload)
 
 
 def _validate_observe(action, instance, observe, region=""):
@@ -1149,7 +1181,7 @@ def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: st
     vision service busy, tesseract missing its language data). Elements are capped at 300 per
     call ("truncated": true when more were detected) — use find_elements to search instead of
     paging. Ids are only valid until the screen changes — re-parse after navigation."""
-    return json.dumps(_do_parse(instance, box_threshold, granularity), ensure_ascii=False)
+    return _dumps(_do_parse(instance, box_threshold, granularity))
 
 
 @mcp.tool()
@@ -1965,20 +1997,42 @@ def upload_file(filepath: str, instance: int = 1, selector: str = "input[type=fi
                      "detail": f"set '{selector}' = {os.path.basename(p)} via CDP"})
 
 
+_VIEWPORT_JS = r"""(function() {
+  var z = window.devicePixelRatio || 1;
+  var side = Math.max(0, (window.outerWidth - window.innerWidth * z) / 2);
+  var top = Math.max(0, window.outerHeight - window.innerHeight * z - side);
+  return {dpr: z, left: Math.round(window.screenX + side), top: Math.round(window.screenY + top),
+          css_width: window.innerWidth, css_height: window.innerHeight};
+})()"""
+
+
 @mcp.tool()
 def browser(action: str = "info", instance: int = 1, url: str = "", js: str = "",
-            page_url_contains: str = "", max_chars: int = TEXT_MAX) -> str:
+            page_url_contains: str = "", max_chars: int = 0, timeout_s: float = 30) -> str:
     """Talk to the instance's Chromium-family browser over the Chrome DevTools Protocol — exact
     navigation and page text without keystrokes or OCR.
 
-    action='info'      → {"ok", "url", "title", "pages": [{url, title}, …]} of the active tab + all tabs
+    action='info'      → {"ok", "url", "title", "pages": [{url, title}, …], "viewport"} of the
+                         active tab + all tabs. `viewport` = {dpr, left, top, css_width,
+                         css_height} maps the page's CSS pixels (getBoundingClientRect) to the
+                         pixels click()/screenshot() use: x = left + css_x*dpr, y = top + css_y*dpr
+                         (dpr is not 1 on a zoomed page; top is the toolbar height)
     action='navigate'  → loads `url` in the active tab (waits for the load event, max 30 s);
                          returns {"ok", "url", "title", "loaded": bool}
     action='text'      → {"ok", "url", "title", "text", "length", "truncated"}: the rendered page
-                         text (document.body.innerText), capped at `max_chars` (default 20000)
+                         text (document.body.innerText), capped at `max_chars` (default 20000,
+                         max 200000)
     action='eval'      → {"ok", "result"}: the JSON value of the JavaScript expression `js`
-                         (e.g. "document.querySelector('h1').innerText"); errors in the page
-                         script come back as a failure with the message
+                         (e.g. "document.querySelector('h1').innerText"); a Promise is awaited.
+                         A result whose JSON is longer than `max_chars` (default 100000, max
+                         1000000) comes back as {"ok", "truncated": true, "length", "result_json":
+                         the first max_chars characters} — raise max_chars or return less
+                         (slice/map in the script). Errors in the page script come back as a
+                         failure with the message
+    `timeout_s` (1–600, default 30) bounds an eval or text call. On a timeout the call fails
+    (isError, "timed_out": true) and the connection stays usable, but the script KEEPS RUNNING
+    in the page — for long work store the outcome on window (js="fetchAll().then(r => {
+    window.__r = r }); 'started'") and poll with short evals.
     `page_url_contains` picks a tab by URL fragment (default: the most recently active page).
     Works only for browsers started by launch_app/start-display.sh (CDP port 9222+N); fails
     (isError) with the fix otherwise, or when the tab, URL or script is bad. The page state you
@@ -1991,14 +2045,27 @@ def browser(action: str = "info", instance: int = 1, url: str = "", js: str = ""
               instance=n)
     if action == "eval" and not (js or "").strip():
         _fail("browser", "empty js expression", fix="pass e.g. js=\"document.title\"", instance=n)
+    if not (1 <= float(timeout_s) <= 600):
+        _fail("browser", f"timeout_s {timeout_s} out of range — nothing was run", fix="use 1 <= timeout_s <= 600", instance=n)
+    if int(max_chars) < 0:
+        _fail("browser", f"max_chars {max_chars} is negative — nothing was run", fix="omit max_chars or pass a positive number",
+              instance=n)
+    wait = float(timeout_s)
     try:
         with _cdp(_cdp_port(n), page_url_contains) as (cmd, target, pages):
             if action == "info":
+                viewport = None
+                try:   # a busy page must not cost `info` its answer
+                    viewport = cmd("Runtime.evaluate", {"expression": _VIEWPORT_JS, "returnByValue": True},
+                                   wait=3).get("result", {}).get("value")
+                except Exception:
+                    pass
                 return _ok("browser", n, url=target.get("url", ""), title=target.get("title", ""),
-                           pages=[{"url": t.get("url", ""), "title": t.get("title", "")} for t in pages])
+                           pages=[{"url": t.get("url", ""), "title": t.get("title", "")} for t in pages],
+                           viewport=viewport)
             if action == "navigate":
                 cmd("Page.enable")
-                r = cmd("Page.navigate", {"url": url})
+                r = cmd("Page.navigate", {"url": url}, wait=30)
                 if r.get("errorText"):
                     _fail("browser", f"navigation failed: {r['errorText']}", fix="check the URL (DNS, scheme)", instance=n)
                 loaded = False
@@ -2014,7 +2081,7 @@ def browser(action: str = "info", instance: int = 1, url: str = "", js: str = ""
                 return _ok("browser", n, url=href, title=title, loaded=loaded,
                            note=None if loaded else "the load event did not fire within 30 s (the page may still be usable)")
             expr = "document.body ? document.body.innerText : ''" if action == "text" else js
-            r = cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True, "awaitPromise": True})
+            r = cmd("Runtime.evaluate", {"expression": expr, "returnByValue": True, "awaitPromise": True}, wait=wait)
             if r.get("exceptionDetails"):
                 ex = r["exceptionDetails"]
                 msg = (ex.get("exception") or {}).get("description") or ex.get("text") or "script error"
@@ -2023,14 +2090,29 @@ def browser(action: str = "info", instance: int = 1, url: str = "", js: str = ""
             val = r.get("result", {}).get("value")
             if action == "text":
                 text = val or ""
-                cap = max(100, min(int(max_chars), 200_000))
+                cap = max(100, min(int(max_chars) or TEXT_MAX, 200_000))
                 t = cmd("Runtime.evaluate", {"expression": "[location.href, document.title]", "returnByValue": True})
                 href, title = (t.get("result", {}).get("value") or ["", ""])[:2]
                 return _ok("browser", n, url=href, title=title, text=text[:cap], length=len(text),
                            truncated=len(text) > cap)
+            cap = max(100, min(int(max_chars) or EVAL_MAX, 1_000_000))
+            as_json = json.dumps(val, ensure_ascii=False)
+            if len(as_json) > cap:
+                return _ok("browser", n, truncated=True, length=len(as_json), result_json=as_json[:cap],
+                           note=f"the result's JSON is {len(as_json)} characters; only the first {cap} are in "
+                                "result_json (cut mid-value, so not parseable)",
+                           fix=f"pass max_chars up to 1000000, or return less from the script (slice/map), or "
+                               "keep it in the page (window.__r = …) and read it in pieces")
             return _ok("browser", n, result=val)
     except ToolError:
         raise
+    except CdpTimeout:
+        _fail("browser", f"the {'script' if action == 'eval' else action} did not finish within {wait:g} s — "
+                         "no result was returned; a script already started keeps running in the page",
+              fix="pass a larger timeout_s (max 600), or start the work without awaiting it and poll: "
+                  "js=\"work().then(r => { window.__r = r }); 'started'\" then js=\"window.__r\"; if even "
+                  "js=\"1\" times out the page's main thread is blocked — screenshot to see why",
+              instance=n, timed_out=True)
     except Exception as e:
         _fail("browser", f"CDP call failed: {e}",
               fix="the browser must be a Chromium-family browser started by launch_app/start-display.sh "
