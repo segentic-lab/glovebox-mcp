@@ -45,14 +45,37 @@ your filesystem. For OS-level isolation run glovebox inside a VM or container.
 
 ## Install
 
-One command. The installer probes the GPU, installs the system packages (auto via `apt` on
-Debian/Ubuntu; it prints the line for dnf/pacman), creates the Python env from `pyproject.toml`,
-downloads the vision models the machine can run, writes `mcp-config.json` **and** `.mcp.json`
-(Claude Code) with your paths, and installs the Claude Code skill:
+One command. Run on a terminal with no arguments, the installer **asks** — on this desktop or in
+a Docker container, which vision backend or app set, whether to install the Claude Code skill —
+offering only what this machine can run (it shows the GPU and whether Docker is there), then
+prints the plan as the equivalent command and installs after a last Enter:
 
 ```bash
 git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh
 ```
+
+```
+Glovebox installer
+  This machine: Linux x86_64 · GPU: NVIDIA RTX A5000 (16384 MiB) · Docker: found
+
+Where should the sandbox run?
+  1) On this desktop      — the apps and logins you already have, as windows on your screen
+  2) In a Docker container — only Docker is installed; apps cannot see your files; you watch it in a browser tab
+  Choice [1]:
+  …
+Plan — the same as running:  ./install.sh container --apps full --no-skill
+Proceed? [Y/n]:
+```
+
+Every question has a default, so Enter all the way through is `./install.sh auto`. Nothing is
+asked when a mode is named (`./install.sh auto`, `basic`, `container`, …), with `-y`/`--yes`, or
+when the script is not on a terminal (piped, CI) — those behave as before. `--plan` prints what
+would be installed and stops.
+
+Natively, the installer probes the GPU, installs the system packages (auto via `apt` on
+Debian/Ubuntu; it prints the line for dnf/pacman), creates the Python env from `pyproject.toml`,
+downloads the vision models the machine can run, writes `mcp-config.json` **and** `.mcp.json`
+(Claude Code) with your paths, and installs the Claude Code skill.
 
 What `auto` picks: an NVIDIA GPU with ≥ 6 GB VRAM → **`local`** (OmniParser + ScreenParser, typed
 elements; ~4 GB of downloads, `--no-screenparser` skips the 153 MB detector); otherwise

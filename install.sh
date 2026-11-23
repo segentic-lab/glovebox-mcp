@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Glovebox installer — system tools, the Python env, the vision backend, the Claude Code skill.
 #
-#   ./install.sh            auto: probe the GPU and install the best backend this machine can run
-#   ./install.sh auto       same (NVIDIA GPU with >= 6 GB VRAM -> local, else basic, else none)
+#   ./install.sh            on a terminal: ASKS (native or container, vision, apps, skill), shows the plan and
+#                           the equivalent command, then installs. Not on a terminal (piped, CI): same as auto.
+#   ./install.sh auto       probe the GPU and install the best backend this machine can run
+#                           (NVIDIA GPU with >= 6 GB VRAM -> local, else basic, else none) — no questions
 #   ./install.sh none       lightest: no local models — the agent reads screenshots itself
 #   ./install.sh basic      Tesseract OCR (text + coords), no GPU/torch
 #   ./install.sh local      OmniParser + ScreenParser grounding on the GPU (typed elements), heaviest/best
@@ -16,11 +18,13 @@
 #         --no-skill          do not install the Claude Code skill (auto-installed when ~/.claude exists)
 #         --no-screenparser   local mode: OmniParser's own detector only (no 153 MB ScreenParser download)
 #         --dev               also install the test dependencies (pytest)
+#         -y, --yes           never ask: no mode named means auto, even on a terminal
+#         --plan              print what would be installed (after any questions) and stop
 #
 # System packages need sudo — on Debian/Ubuntu the script runs apt itself; elsewhere it prints the line.
 # Idempotent: re-run it any time (it only downloads what is missing).
 set -e
-MODE=""; SKILL=1; SCREENPARSER=1; DEV=0; APPS=browser; CVISION=""; NEXT=""
+MODE=""; SKILL=1; SCREENPARSER=1; DEV=0; APPS=browser; CVISION=""; NEXT=""; YES=0; PLAN=0
 for a in "$@"; do
   if [[ -n "$NEXT" ]]; then printf -v "$NEXT" '%s' "$a"; NEXT=""; continue; fi
   case "$a" in
@@ -31,15 +35,151 @@ for a in "$@"; do
     --no-skill) SKILL=0 ;;
     --no-screenparser) SCREENPARSER=0 ;;
     --dev) DEV=1 ;;
-    -h|--help) sed -n 2,21p "$0"; exit 0 ;;
+    -y|--yes) YES=1 ;;
+    --plan) PLAN=1 ;;
+    -h|--help) sed -n 2,26p "$0"; exit 0 ;;
     *) MODE="$a" ;;
   esac
 done
-MODE="${MODE:-auto}"
-REQUESTED="$MODE"   # what the user asked for (auto = let the server choose at run time)
 cd "$(dirname "$0")"
 DIR="$(pwd)"
 export PATH="$HOME/.local/bin:$PATH"
+
+# ---- GPU probe (the same thresholds vision.py uses: >= 6 GB VRAM for OmniParser) ----
+probe_gpu() {
+  GPU_NAME=""; VRAM=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')
+  fi
+}
+
+# ---- interactive mode: no mode named, a person at a terminal ----
+# Every question has a default (Enter); end of input takes the defaults, so it can never hang a
+# script. GLOVEBOX_INSTALL_ASK=1 forces the questions without a terminal (the tests pipe answers).
+ask_choice() {   # ask_choice VAR DEFAULT MAX  -> VAR = a number 1..MAX
+  local ans tries=0
+  while :; do
+    printf '  Choice [%s]: ' "$2"
+    if ! IFS= read -r ans; then ans=""; echo; fi
+    ans="${ans:-$2}"
+    if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= $3 )); then printf -v "$1" '%s' "$ans"; return 0; fi
+    echo "  please answer with a number from 1 to $3"
+    tries=$((tries + 1))
+    if (( tries >= 5 )); then echo "✗ No valid answer — nothing was installed."; exit 1; fi
+  done
+}
+ask_yes() {      # ask_yes QUESTION Y|N  -> exit status 0 = yes
+  local ans
+  printf '%s [%s]: ' "$1" "$([[ "$2" == Y ]] && echo Y/n || echo y/N)"
+  if ! IFS= read -r ans; then ans=""; echo; fi
+  [[ "${ans:-$2}" =~ ^[Yy] ]]
+}
+
+interactive() {
+  local os docker_ok=0 native_ok=0 native_why="" local_ok=0 host_vision_ok=0 c gpu_line docker_line def
+  os="$(uname -s)"
+  [[ "$os" == "Linux" ]] && native_ok=1 || native_why="the native sandbox needs Linux (X11); this is $os"
+  command -v docker >/dev/null 2>&1 && docker_ok=1
+  probe_gpu
+  [[ -n "$VRAM" && "$VRAM" -ge 6000 ]] && local_ok=1
+  [[ "$os" == "Linux" && -x "$DIR/.venv/bin/python" && -d "$DIR/OmniParser/weights" ]] && host_vision_ok=1
+  if [[ -n "$VRAM" ]]; then gpu_line="${GPU_NAME:-NVIDIA} (${VRAM} MiB)"; else gpu_line="none visible"; fi
+  [[ $docker_ok == 1 ]] && docker_line="found" || docker_line="not found"
+
+  echo "Glovebox installer"
+  echo "  This machine: $os $(uname -m) · GPU: $gpu_line · Docker: $docker_line"
+  echo "  (Enter takes the choice in [brackets]; ./install.sh --help lists the non-interactive forms.)"
+  echo
+  if [[ $native_ok == 0 && $docker_ok == 0 ]]; then
+    echo "✗ Nothing can be installed here yet: $native_why, and Docker is not installed."
+    echo "  Install Docker Desktop, then run ./install.sh again."
+    exit 1
+  fi
+  echo "Where should the sandbox run?"
+  echo "  1) On this desktop      — the apps and logins you already have, as windows on your screen"
+  [[ $native_ok == 0 ]] && echo "                            [not available: $native_why]"
+  echo "  2) In a Docker container — only Docker is installed; apps cannot see your files; you watch it in a browser tab"
+  [[ $docker_ok == 0 ]] && echo "                            [not available: Docker is not installed]"
+  [[ $native_ok == 1 ]] && def=1 || def=2
+  while :; do
+    ask_choice c "$def" 2
+    if [[ $c == 1 && $native_ok == 0 ]]; then echo "  not available: $native_why"; continue; fi
+    if [[ $c == 2 && $docker_ok == 0 ]]; then echo "  not available: install Docker first"; continue; fi
+    break
+  done
+  echo
+  if [[ $c == 1 ]]; then
+    echo "Vision — how the agent finds things the app does not describe itself (accessibility is always on):"
+    if [[ $local_ok == 1 ]]; then echo "  1) auto  — the best this machine can run: here that is 'local' (your GPU)"
+    else echo "  1) auto  — the best this machine can run: here that is 'basic' (OCR)"; fi
+    echo "  2) local — OmniParser + ScreenParser on the GPU: typed elements, ~4 GB of downloads"
+    [[ $local_ok == 0 ]] && echo "            [not available: needs an NVIDIA GPU with at least 6 GB VRAM]"
+    echo "  3) basic — Tesseract OCR on the CPU: text only"
+    echo "  4) none  — no models: the agent reads screenshots itself"
+    while :; do
+      ask_choice c 1 4
+      if [[ $c == 2 && $local_ok == 0 ]]; then echo "  not available on this machine"; continue; fi
+      break
+    done
+    case $c in 1) MODE=auto ;; 2) MODE=local ;; 3) MODE=basic ;; 4) MODE=none ;; esac
+    if [[ $MODE == local || ( $MODE == auto && $local_ok == 1 ) ]] && [[ $SCREENPARSER == 1 ]]; then
+      echo
+      ask_yes "Also download the ScreenParser detector (153 MB; names buttons, links, inputs)?" Y || SCREENPARSER=0
+    fi
+  else
+    MODE=container
+    echo "Apps in the container image:"
+    echo "  1) browser — Chromium (~1.8 GB)"
+    echo "  2) basic   — + text editor, file manager, PDF and image viewers, calculator, terminal (~2.0 GB)"
+    echo "  3) full    — + LibreOffice, GIMP, Inkscape, Firefox, VLC (~3.5 GB)"
+    ask_choice c 1 3
+    case $c in 1) APPS=browser ;; 2) APPS=basic ;; 3) APPS=full ;; esac
+    echo
+    echo "Vision in the container (accessibility is always on):"
+    echo "  1) OCR — built into the image"
+    echo "  2) this machine's GPU — the container uses the vision service of your native install;"
+    echo "     screenshots sent for parsing then leave the container"
+    [[ $host_vision_ok == 0 ]] && echo "     [not available: needs a native './install.sh local' on this Linux machine first]"
+    while :; do
+      ask_choice c 1 2
+      if [[ $c == 2 && $host_vision_ok == 0 ]]; then echo "  not available on this machine"; continue; fi
+      break
+    done
+    [[ $c == 2 ]] && CVISION=host || CVISION=""
+  fi
+  if [[ $SKILL == 1 && -d "$HOME/.claude" ]]; then
+    echo
+    ask_yes "Install the Claude Code skill into ~/.claude/skills (teaches Claude how to drive Glovebox)?" Y || SKILL=0
+  fi
+  echo
+  echo "Plan — the same as running:  $(equivalent_command)"
+  if ! ask_yes "Proceed?" Y; then echo "Nothing was installed."; exit 0; fi
+  echo
+}
+
+equivalent_command() {
+  local cmd="./install.sh $MODE"
+  if [[ "$MODE" == "container" ]]; then
+    [[ "$APPS" != "browser" ]] && cmd="$cmd --apps $APPS"
+    [[ -n "$CVISION" ]] && cmd="$cmd --vision $CVISION"
+  elif [[ "$SCREENPARSER" == 0 ]]; then cmd="$cmd --no-screenparser"
+  fi
+  [[ "$SKILL" == 0 ]] && cmd="$cmd --no-skill"
+  [[ "$DEV" == 1 ]] && cmd="$cmd --dev"
+  echo "$cmd"
+}
+
+if [[ -z "$MODE" && "$YES" == 0 ]] && { [[ -t 0 && -t 1 ]] || [[ "${GLOVEBOX_INSTALL_ASK:-}" == 1 ]]; }; then
+  interactive
+fi
+MODE="${MODE:-auto}"
+REQUESTED="$MODE"   # what the user asked for (auto = let the server choose at run time)
+if [[ "$PLAN" == 1 ]]; then
+  echo "plan: mode=$MODE apps=$APPS container_vision=${CVISION:-ocr} skill=$SKILL screenparser=$SCREENPARSER dev=$DEV"
+  echo "command: $(equivalent_command)"
+  exit 0
+fi
 
 install_skill() {
   DEST="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/glovebox"
@@ -91,8 +231,9 @@ JSON
 fi
 
 if [[ "$MODE" != "auto" && "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
-  echo "Usage: ./install.sh [auto|none|basic|local|container|skill] [--no-skill] [--no-screenparser] [--dev]"
-  echo "  auto   — probe the GPU, install the best backend this machine can run (default)"
+  echo "Usage: ./install.sh [auto|none|basic|local|container|skill] [--no-skill] [--no-screenparser] [--dev] [--yes] [--plan]"
+  echo "  (no mode, on a terminal) — asks what to install"
+  echo "  auto   — probe the GPU, install the best backend this machine can run (the default when not on a terminal)"
   echo "  none   — no local grounding model (the agent's own vision); lightest, instant install"
   echo "  basic  — Tesseract OCR, no GPU"
   echo "  local  — OmniParser + ScreenParser on the GPU (best grounding; ~4 GB downloads)"
@@ -101,12 +242,7 @@ if [[ "$MODE" != "auto" && "$MODE" != "none" && "$MODE" != "basic" && "$MODE" !=
   exit 1
 fi
 
-# ---- GPU probe (the same thresholds vision.py uses: >= 6 GB VRAM for OmniParser) ----
-GPU_NAME=""; VRAM=""
-if command -v nvidia-smi >/dev/null 2>&1; then
-  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
-  VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -dc '0-9')
-fi
+probe_gpu
 if [[ -n "$VRAM" ]]; then echo "▶ GPU: ${GPU_NAME:-unknown} — ${VRAM} MiB VRAM"; else echo "▶ GPU: none visible (nvidia-smi not found or no NVIDIA device)"; fi
 if [[ "$MODE" == "auto" ]]; then
   if [[ -n "$VRAM" && "$VRAM" -ge 6000 ]]; then MODE=local

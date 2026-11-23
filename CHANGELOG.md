@@ -8,6 +8,19 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+### Added
+- **Interactive `./install.sh`.** Run on a terminal without a mode, the installer asks where
+  the sandbox should run (this desktop or a Docker container), which vision backend or
+  container app set, and whether to install the Claude Code skill. It shows what it detected
+  (OS, GPU, Docker), refuses the options this machine cannot run and says why, prints the plan
+  as the equivalent non-interactive command, and installs only after a final confirmation.
+  Every question has a default; end of input takes the defaults, so it cannot hang a script.
+- `./install.sh --plan` prints what would be installed and stops; `-y`/`--yes` never asks.
+
+### Changed
+- `./install.sh` with no arguments on a terminal now asks instead of silently running `auto`.
+  Named modes, `--yes` and non-terminal runs (pipes, CI) are unchanged.
+
 ## [0.7.0] - 2026-11-23
 
 ### Added
