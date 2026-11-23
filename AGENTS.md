@@ -26,8 +26,10 @@ in one call.
 
 - `status()` → `"container"` is set when the server runs in **container mode**: the instances are
   windows on a virtual desktop the person watches in a web browser (`container.view_url`), only
-  the apps in the image exist (a browser by default), there is no GPU vision (accessibility and
-  OCR ground you), and file paths are container paths — `put_file` / `list_files` /
+  the apps in the image exist (`container.apps.installed` — a browser by default; do not try to
+  launch anything else), vision is OCR unless `container.vision` is `host-service` (then
+  `parse_screen(source="vision")` is answered by the host's GPU; it falls back to OCR when that
+  service is down — `vision.reason` says so), and file paths are container paths — `put_file` / `list_files` /
   `upload_file` work the same, the person finds the files in `container-data/files/<N>/`.
 
 - Each **instance** (`instance=N`, default `1`) is one app window on its own display. You **cannot

@@ -49,6 +49,20 @@ reported to MCP clients during the initialize handshake.
   `up`/`down`/`status`/`build`), `./install.sh container`, `GLOVEBOX_MODE=container` (an
   existing install hands its sessions to the container), `status().container`. The image is
   built and driven on amd64 and arm64 in CI (`tests/container_smoke.py`, 16 checks).
+- **Container app sets** — `--build-arg APPS=browser|basic|full` (`./install.sh container
+  --apps full`, `GLOVEBOX_APPS=full python3 container.py build`): Chromium; plus an editor, file
+  manager, PDF and image viewers, calculator, archiver and terminal; plus LibreOffice, GIMP,
+  Inkscape, Firefox ESR and VLC. `EXTRA_APT` adds any Debian package on top;
+  `python3 container.py install PKG…` adds packages to the running container.
+  `status().container.apps` lists the set and what is installed.
+- **Container vision from the host's GPU** (opt-in, Linux hosts) —
+  `GLOVEBOX_CONTAINER_VISION=host` / `./install.sh container --vision host` mounts, read-only,
+  one directory holding a hard link to the host's vision-service socket; the container's
+  `parse_screen` then goes through that service (`"via": "host-service"`), so the image carries
+  no models and native and container agents share one model load. The service publishes the
+  link itself when the directory exists (`vision_service.publish_share`), `container.py`
+  starts it at session start, and when it is down the container falls back to OCR with the
+  reason and the fix. New CLI: `vision_service.py start`.
 - `.github/workflows/docker-publish.yml` — pushes the image to GHCR; manual trigger only.
 
 ### Changed
@@ -62,8 +76,8 @@ reported to MCP clients during the initialize handshake.
 
 ### Known limits
 - Container: Chromium runs with `--no-sandbox` under Docker's default seccomp profile
-  (reported by `status()`); the image ships no GPU vision models; only Chromium is installed
-  unless the image is built with `EXTRA_APT`.
+  (reported by `status()`); no image carries GPU vision models (the host's service can be
+  shared instead, on Linux); Firefox in the `full` set is read by OCR, not accessibility.
 - Accessibility: cross-origin iframes are counted (`frames_skipped`), not read; the browser's
   own toolbar is not listed; Tk/Xlib apps expose nothing.
 

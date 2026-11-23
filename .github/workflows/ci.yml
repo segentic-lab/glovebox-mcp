@@ -43,24 +43,34 @@ jobs:
   container:
     # Container mode, on both architectures people run Docker on (arm64 = Apple Silicon hosts):
     # build the image, then a real MCP session through container.py into it.
+    # The third leg builds the full app set and shares a (fake, GPU-less) host vision service
+    # into the container: the mount, the socket link and the protocol are what it proves.
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - {runner: ubuntu-latest, apps: browser, vision: ""}
+          - {runner: ubuntu-24.04-arm, apps: browser, vision: ""}
+          - {runner: ubuntu-latest, apps: full, vision: host}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build the image
-        run: docker build -t glovebox-mcp:local .
+      - name: Build the image (apps: ${{ matrix.apps }})
+        run: docker build -t glovebox-mcp:local --build-arg APPS=${{ matrix.apps }} .
       - name: MCP client for the smoke test (the server itself runs in the container)
-        run: pip install "mcp[cli]>=2.0,<3"
+        run: pip install "mcp[cli]>=2.0,<3" Pillow
+      - name: A stand-in for the host's GPU vision service
+        if: matrix.vision == 'host'
+        run: python vision_service.py start --fake --idle-min 30
       - name: Smoke test through the launcher
         env:
           GLOVEBOX_CONTAINER: glovebox-ci
           GLOVEBOX_DATA: ${{ runner.temp }}/glovebox-data
+          GLOVEBOX_APPS: ${{ matrix.apps }}
+          GLOVEBOX_CONTAINER_VISION: ${{ matrix.vision }}
         run: python tests/container_smoke.py
       - name: Container logs on failure
         if: failure()

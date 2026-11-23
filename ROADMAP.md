@@ -81,8 +81,12 @@ Left open by this round:
 - **Chromium's sandbox in the container** — off under Docker's default seccomp profile. A
   maintained profile (or documenting Podman rootless, where user namespaces work) would turn it
   back on; the server already detects when it can.
-- **GPU vision in the container** — the image ships OCR only. Needs the NVIDIA container toolkit
-  and the OmniParser weights mounted in, never baked in (the icon detector is AGPL-3.0).
+- **GPU vision without a native install** — a Linux host can share its vision service into the
+  container (`GLOVEBOX_CONTAINER_VISION=host`, done 2026-11-23). A host with an NVIDIA GPU but no
+  native install (Windows + WSL2) still has only OCR: that needs an image with torch, the NVIDIA
+  container toolkit and the weights mounted in, never baked in (the icon detector is AGPL-3.0).
+- **Firefox in the container** is read by OCR: it is not a CDP browser and exposes AT-SPI only
+  with accessibility forced on.
 - **The browser's own toolbar and native menus of a browser** are not in the DOM; Chromium
   exposes them over AT-SPI only with accessibility forced on.
 - **Publishing the image** (GHCR) is a manual workflow, not yet run.

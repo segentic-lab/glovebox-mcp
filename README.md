@@ -101,10 +101,10 @@ What is different from native mode — `status()` says so in `container` and `no
 | | Native | Container |
 |---|---|---|
 | Isolation | display only: apps run as you, with your files | the container: apps see only `container-data/files` and `container-data/profiles` |
-| Apps | everything installed on your machine | what the image ships: Chromium. More with `docker build --build-arg EXTRA_APT="libreoffice gimp inkscape" …` |
+| Apps | everything installed on your machine | the image's app set (below); `status().container.apps.installed` lists them |
 | Logins | your per-instance profiles in `profiles/` | `container-data/profiles` — log in once through the web viewer; kept across rebuilds |
 | Where you watch | windows on your desktop | the web viewer, published on `127.0.0.1` only (`GLOVEBOX_VNC_PASSWORD` adds a password) |
-| Grounding | accessibility, OCR, or OmniParser on your GPU | accessibility and OCR; the image has no GPU models |
+| Grounding | accessibility, OCR, or OmniParser on your GPU | accessibility and OCR; optionally your GPU through the host's vision service (below) |
 | File paths in replies | host paths | container paths (`/app/files/<N>/…` = `container-data/files/<N>/…` on the host) |
 
 Chromium runs with `--no-sandbox` in the container, because Docker's default seccomp profile
@@ -112,10 +112,44 @@ forbids the user namespaces its sandbox needs; `status()` reports it (`container
 The container itself is then the isolation layer. Start the container with a seccomp profile that
 allows user namespaces and Glovebox keeps Chromium's sandbox on by itself.
 
+**App sets** — chosen when the image is built:
+
+| Set | Apps | Image size |
+|---|---|---|
+| `browser` (default) | Chromium | ~1.8 GB |
+| `basic` | + Mousepad (editor), PCManFM (files), Evince (PDF), Eye of GNOME (images), Galculator, File Roller, xterm | ~2.0 GB |
+| `full` | + LibreOffice, GIMP, Inkscape, Firefox ESR, VLC | ~3.5 GB |
+
+```bash
+./install.sh container --apps full              # or: GLOVEBOX_APPS=full python3 container.py build
+docker build -t glovebox-mcp:local --build-arg APPS=basic --build-arg EXTRA_APT="thunderbird kate" .
+python3 container.py install gedit              # into the RUNNING container; lasts until `down`
+```
+
+All of them except Firefox answer through accessibility (`source: at-spi`), so `find_elements` and
+`act` work on them without any vision; Firefox is read by OCR. Any Debian package can be added
+with `EXTRA_APT`.
+
+**Vision** — three levels, cheapest first:
+
+1. **Accessibility** (always on): browsers and the apps above describe themselves. No model.
+2. **OCR** (always in the image): Tesseract, for what accessibility does not expose.
+3. **Your GPU, shared from the host** (opt-in, Linux hosts with a native `./install.sh local`):
+   `./install.sh container --vision host`, or `GLOVEBOX_CONTAINER_VISION=host` when the container
+   is created. The container gets nothing but a read-only mount of one directory holding a link
+   to the host's vision-service socket; `parse_screen` then answers with `"via": "host-service"`.
+   The image stays small, and native and container agents share **one** model load. The trade-off
+   is stated in `status()`: screenshots sent for parsing leave the container. When the host's
+   service is not running (it idle-exits), vision falls back to OCR and says why; every new
+   session through `container.py` starts it again.
+
+There is no image with the GPU models built in: it would be ~8 GB larger, need the NVIDIA
+container toolkit, and the icon detector's AGPL-3.0 weights could not be shipped in it anyway.
+
 The sandbox user inside the container takes the numeric id of the data folder's owner, so what
 the apps write there belongs to you, whatever your user id is.
 
-`python3 container.py up | down | status | build` manage the container; the image is built for
+`python3 container.py up | down | status | build | install` manage the container; the image is built for
 amd64 and arm64 (Apple Silicon) and both are exercised in CI.
 
 ### Claude Code skill
@@ -340,6 +374,8 @@ in-progress downloads.
 | `GLOVEBOX_MODE` | unset | `container` → `server.py` serves from the Docker container instead of this desktop |
 | `GLOVEBOX_CONTAINER` · `GLOVEBOX_IMAGE` · `GLOVEBOX_DATA` · `GLOVEBOX_VIEW_PORT` | `glovebox` · `glovebox-mcp:local` · `./container-data` · `6080` | container mode: name, image, host folder for files + profiles, host port of the web viewer |
 | `GLOVEBOX_DESKTOP_SIZE` · `GLOVEBOX_VNC_PASSWORD` | `1920x1080` · none | container mode: size of the virtual desktop, password for the viewer (applied when the container is created) |
+| `GLOVEBOX_APPS` | `browser` | container mode: app set of the image `container.py build` / compose make (`browser` · `basic` · `full`) |
+| `GLOVEBOX_CONTAINER_VISION` | unset (OCR) | container mode: `host` → a newly created container shares this machine's GPU vision service |
 
 ## Maintenance (`local` mode)
 

@@ -225,3 +225,39 @@ def test_shutdown_drains_in_flight_parse(sock_path):
     assert result["elems"][0]["label"] == "fake element"   # it still got its answer
     t.join(timeout=5)
     assert not t.is_alive() and not os.path.exists(sock_path)
+
+
+def test_share_link_reaches_the_same_service_and_follows_restarts(tmp_path):
+    """A container mounts only the share directory: the link in it must lead to the live socket,
+    be re-pointed when the service restarts, and exist only when sharing was set up."""
+    path = str(tmp_path / "rt" / "vision.sock")
+    link = vs.share_socket(path)
+    assert link == str(tmp_path / "rt" / "glovebox-vision-share" / "vision.sock")
+    svc = vs.Service(path, fake=True, idle_s=60)
+    t = threading.Thread(target=svc.serve_forever, daemon=True)
+    t.start()
+    for _ in range(50):
+        if vs.ping(path):
+            break
+        time.sleep(0.1)
+    assert vs.ping(path) and not os.path.exists(link)      # nobody asked for sharing: no link
+    assert vs.publish_share(path) is False
+    os.makedirs(os.path.dirname(link), mode=0o700)
+    assert vs.publish_share(path) is True and vs.publish_share(path) is True
+    assert vs.ping(link)["running"] is True                 # same service, through the link
+    assert os.stat(link).st_ino == os.stat(path).st_ino
+    svc.stop_event.set()
+    t.join(timeout=10)
+    assert not os.path.exists(link) and vs.ping(link) is None
+    svc2 = vs.Service(path, fake=True, idle_s=60)             # a restart publishes by itself
+    t2 = threading.Thread(target=svc2.serve_forever, daemon=True)
+    t2.start()
+    for _ in range(50):
+        if vs.ping(link):
+            break
+        time.sleep(0.1)
+    try:
+        assert vs.ping(link)["running"] is True
+    finally:
+        svc2.stop_event.set()
+        t2.join(timeout=10)

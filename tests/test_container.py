@@ -101,12 +101,54 @@ def test_server_command_forwards_only_settings_that_mean_something_inside(monkey
 
 def test_cli_status_is_json_and_touches_nothing(monkeypatch, capsys):
     fake = FakeDocker({("inspect", "-f", "{{.State.Status}}"): (0, "running\n", ""),
-                       ("inspect", "-f", "{{.Config.Image}}"): (0, "glovebox-mcp:local\n", "")})
+                       ("inspect", "-f", "{{.Config.Image}}"): (0, "glovebox-mcp:local\n", ""),
+                       ("inspect", "-f", "{{range .Mounts}}{{.Destination}} {{end}}"): (0, "/app/files /app/profiles \n", ""),
+                       ("exec", container.NAME, "printenv"): (0, "full\n", "")})
     monkeypatch.setattr(container, "docker", fake)
     assert container.main(["status"]) == 0
     d = json.loads(capsys.readouterr().out)
     assert d["state"] == "running" and d["image"] == "glovebox-mcp:local" and "vnc.html" in d["view_url"]
-    assert all(c[0] == "inspect" for c in fake.calls)
+    assert d["apps"] == "full" and d["vision"] == "ocr"
+    assert all(c[0] == "inspect" or c[:3] == ("exec", container.NAME, "printenv") for c in fake.calls)
+
+
+def test_vision_sharing_is_opt_in_and_mounts_only_the_share_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(container, "DATA", str(tmp_path / "data"))
+    monkeypatch.setenv("GLOVEBOX_VISION_SOCKET", str(tmp_path / "rt" / "glovebox-vision.sock"))
+    monkeypatch.delenv("GLOVEBOX_CONTAINER_VISION", raising=False)
+    args = container.run_args("glovebox-mcp:local")
+    assert not any(container.VISION_MOUNT in a for a in args) and "GLOVEBOX_VISION_REMOTE=1" not in args
+    monkeypatch.setenv("GLOVEBOX_CONTAINER_VISION", "host")
+    monkeypatch.setattr(container.sys, "platform", "linux")
+    args = container.run_args("glovebox-mcp:local")
+    share = tmp_path / "rt" / "glovebox-vision-share"
+    assert f"{share}:{container.VISION_MOUNT}:ro" in args          # read-only, and not the runtime dir itself
+    assert share.is_dir() and oct(share.stat().st_mode & 0o777) == "0o700"
+    assert f"GLOVEBOX_VISION_SOCKET={container.VISION_MOUNT}/vision.sock" in args and "GLOVEBOX_VISION_REMOTE=1" in args
+    monkeypatch.setattr(container.sys, "platform", "darwin")
+    with pytest.raises(container.Problem, match="needs a Linux host"):
+        container.run_args("glovebox-mcp:local")
+    monkeypatch.setenv("GLOVEBOX_CONTAINER_VISION", "cloud")
+    with pytest.raises(container.Problem, match="use 'host'"):
+        container.run_args("glovebox-mcp:local")
+
+
+def test_the_host_socket_setting_never_leaks_into_the_container(monkeypatch):
+    """Inside, the socket path is the mount; forwarding the host's path would point at nothing."""
+    for k in list(__import__("os").environ):
+        if k.startswith("GLOVEBOX_"):
+            monkeypatch.delenv(k)
+    monkeypatch.setenv("GLOVEBOX_VISION_SOCKET", "/run/user/1000/glovebox-vision.sock")
+    monkeypatch.setenv("GLOVEBOX_CONTAINER_VISION", "host")
+    monkeypatch.setenv("GLOVEBOX_APPS", "full")
+    assert container.server_cmd() == ["docker", "exec", "-i", container.NAME, "glovebox-server"]
+
+
+def test_install_refuses_anything_but_package_names(monkeypatch):
+    monkeypatch.setattr(container, "docker", FakeDocker({}))
+    monkeypatch.setattr(container.subprocess, "call", lambda *a, **kw: pytest.fail("nothing may run"))
+    for bad in ([], ["gimp; rm -rf /"], ["$(id)"], ["a b"]):
+        assert container.main(["install", *bad]) == 2
 
 
 def test_container_mode_hands_over_before_the_heavy_imports():

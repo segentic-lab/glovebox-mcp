@@ -5,6 +5,9 @@ Not collected by pytest (it needs Docker and a built image); CI runs it after `d
     GLOVEBOX_CONTAINER=glovebox-ci python tests/container_smoke.py
 It starts the container if needed, drives a browser inside it through the accessibility and the
 OCR path, checks that a staged file lands in the host's data folder, and closes what it opened.
+GLOVEBOX_APPS=basic|full (the set the image was built with) adds a native app read over AT-SPI;
+GLOVEBOX_CONTAINER_VISION=host adds a parse through the host's vision service (CI starts a
+`--fake` one: the mount, the link and the protocol are what is tested, not a GPU).
 Exit code 0 = every check passed."""
 import asyncio
 import json
@@ -16,6 +19,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import container  # noqa: E402
 
+APPS = os.environ.get("GLOVEBOX_APPS", "browser")
+VISION_HOST = os.environ.get("GLOVEBOX_CONTAINER_VISION", "") == "host"
 PAGE = ("data:text/html,<title>t</title><h1>Obrazec</h1><label for=n>Ime</label> <input id=n>"
         "<label><input type=checkbox id=c> Strinjam se</label>"
         "<button onclick=\"document.getElementById('o').textContent='saved '+n.value+' '+c.checked\">Shrani</button>"
@@ -48,7 +53,15 @@ async def main() -> int:
             check("handshake reports the version", init.server_info.version == container.__version__, init.server_info.version)
             st = payload(await s.call_tool("status", {}))
             check("status says it runs in the container", bool(st.get("container")), str(st.get("container")))
-            check("vision resolves to OCR without a GPU", st["vision"]["effective"] == "basic", st["vision"].get("reason", ""))
+            cont = st.get("container") or {}
+            if VISION_HOST:
+                check("vision is the host's service", cont.get("vision") == "host-service" and st["vision"]["effective"] == "local",
+                      f"{cont.get('vision')} / {st['vision']}")
+            else:
+                check("vision resolves to OCR without a GPU", st["vision"]["effective"] == "basic", st["vision"].get("reason", ""))
+            apps = cont.get("apps") or {}
+            check(f"status names the app set ({APPS})", apps.get("set") == APPS and "chromium" in apps.get("installed", [])
+                  and (APPS == "browser") == ("mousepad" not in apps.get("installed", [])), str(apps))
             check("AT-SPI bindings are in the image", st["deps"].get("atspi") is True)
             try:
                 code = urllib.request.urlopen(f"http://127.0.0.1:{container.PORT}/vnc.html", timeout=10).status
@@ -84,8 +97,13 @@ async def main() -> int:
                 p = payload(await s.call_tool("wait_for_text", {"text": "saved Ana Kovač true", "instance": n, "timeout_ms": 8000}))
                 check("the page shows the result", p.get("satisfied") is True, json.dumps(p)[:300])
 
-                p = payload(await s.call_tool("find_elements", {"query": "Obrazec", "instance": n, "source": "vision"}))
-                check("OCR reads the same screen", p.get("source") == "vision" and p.get("count", 0) >= 1, json.dumps(p)[:300])
+                if VISION_HOST:
+                    p = payload(await s.call_tool("parse_screen", {"instance": n, "source": "vision"}))
+                    check("a parse goes through the host's vision service", p.get("via") == "host-service" and p.get("count", 0) >= 1,
+                          json.dumps(p)[:300])
+                else:
+                    p = payload(await s.call_tool("find_elements", {"query": "Obrazec", "instance": n, "source": "vision"}))
+                    check("OCR reads the same screen", p.get("source") == "vision" and p.get("count", 0) >= 1, json.dumps(p)[:300])
                 res = await s.call_tool("screenshot", {"instance": n, "scale": 0.5})
                 check("a screenshot comes back as an image", len(res.content) == 2 and res.content[1].type == "image")
 
@@ -96,6 +114,28 @@ async def main() -> int:
             finally:
                 res = await s.call_tool("close_instance", {"instance": n})
                 check("the instance closes", not res.is_error, json.dumps(payload(res))[:300])
+
+            if APPS != "browser":
+                p = payload(await s.call_tool("launch_app", {"command": "mousepad", "size": "900x600"}))
+                m = p.get("instance")
+                check("a native app from the set launches", m is not None, json.dumps(p)[:300])
+                if m is not None:
+                    try:
+                        f = {}
+                        for _ in range(30):
+                            f = payload(await s.call_tool("find_elements", {"query": "file", "instance": m, "source": "a11y"}))
+                            if f.get("count"):
+                                break
+                            await asyncio.sleep(0.5)
+                        check("the native app is read over AT-SPI inside the container", f.get("source") == "at-spi" and f.get("count", 0) >= 1,
+                              json.dumps(f)[:300])
+                        if f.get("count"):
+                            p = payload(await s.call_tool("act", {"element": f["elements"][0]["id"], "instance": m,
+                                                                  "observe": "changes", "settle_ms": 500}))
+                            labels = [e.get("label") for e in (p.get("changes") or {}).get("appeared", [])]
+                            check("act opens its menu and reports what appeared", any(l and "Save" in l for l in labels), str(labels)[:300])
+                    finally:
+                        await s.call_tool("close_instance", {"instance": m})
     print(f"{sum(checks)}/{len(checks)} checks passed", flush=True)
     return 0 if all(checks) else 1
 

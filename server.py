@@ -129,6 +129,11 @@ MODIFIERS = {"ctrl", "control", "alt", "shift", "super", "meta", "hyper", "lock"
              "mod1", "mod2", "mod3", "mod4", "mod5"}
 
 USE_SERVICE = os.environ.get("GLOVEBOX_VISION_SERVICE", "1").strip().lower() not in ("0", "false", "no", "off")
+# Container mode with vision shared from the host: the models live in the HOST's vision service,
+# reached over a mounted socket. This process can neither start that service nor load models.
+REMOTE_VISION = os.environ.get("GLOVEBOX_VISION_REMOTE", "").strip().lower() in ("1", "true", "yes", "on")
+REMOTE_VISION_FIX = ("on the host: python3 container.py up (it starts the vision service), or run "
+                     "`.venv/bin/python vision_service.py start` in the glovebox folder")
 # Host <-> instance bridge: one detached process per instance mirrors the clipboard and keeps the
 # keymap equal to the host's (see host_bridge.py). The env var keeps its historical name.
 CLIP_SYNC = os.environ.get("GLOVEBOX_CLIPBOARD_SYNC", "1").strip().lower() not in ("0", "false", "no", "off")
@@ -147,10 +152,22 @@ def _vision() -> dict:
     freeing the GPU takes effect without a server restart (it used to be fixed at import)."""
     now = time.time()
     if _VISION["value"] is None or now - _VISION["at"] > VISION_TTL:
-        svc = vision_service.ping() if USE_SERVICE else None
-        _VISION["value"] = vision.resolve(service_loaded=bool(svc and svc.get("loaded")))
+        svc = vision_service.ping() if USE_SERVICE or REMOTE_VISION else None
+        if REMOTE_VISION:
+            _VISION["value"] = vision.resolve(omni=_remote_omni(svc), service_loaded=True)
+        else:
+            _VISION["value"] = vision.resolve(service_loaded=bool(svc and svc.get("loaded")))
         _VISION["at"] = now
     return _VISION["value"]
+
+
+def _remote_omni(svc) -> dict:
+    """What vision.resolve needs to know about OmniParser when it is the host's, not ours."""
+    if svc:
+        return {"ready": True, "reason": "ok", "remote": True, "detector": {"effective": svc.get("detector")}}
+    return {"ready": False, "remote": True, "detector": {"effective": None},
+            "reason": "the host's vision service is not answering on the shared socket (it idle-exits; "
+                      f"only the host can start it — {REMOTE_VISION_FIX})"}
 
 
 def _parse_local(img, box_threshold, ann, instance):
@@ -158,6 +175,14 @@ def _parse_local(img, box_threshold, ann, instance):
     falls back to loading the models in THIS process only when the service cannot be reached or
     started — a reachable-but-busy service is reported as such (VisionError), never duplicated.
     Returns (elements, meta): which path answered, how long it queued, why it fell back."""
+    if REMOTE_VISION:                  # the host's service or nothing: no models in this container
+        try:
+            elems, meta = vision_service.parse(img, box_threshold, ann, instance)
+        except (OSError, ValueError, ConnectionError) as e:
+            _VISION["at"] = 0.0        # re-resolve at once: auto then falls back to OCR
+            raise vision.VisionError(f"the host's vision service stopped answering ({type(e).__name__})",
+                                     f"retry (auto falls back to OCR), or restart it {REMOTE_VISION_FIX}") from None
+        return elems, {"via": "host-service", **meta}
     if USE_SERVICE and time.time() - _SERVICE_FAILED_AT[0] > 60:
         reason = None
         try:
@@ -722,6 +747,9 @@ def _annotate(img, elems, boxes, path):
     im.save(path)
 
 
+# what launch_app can start in a container image, by app set (see the Dockerfile's APPS)
+CONTAINER_APPS = ("chromium", "firefox-esr", "mousepad", "pcmanfm", "xterm", "evince", "eog", "galculator",
+                  "file-roller", "libreoffice", "gimp", "inkscape", "vlc", "thunderbird")
 _USERNS = {}
 
 
@@ -2945,17 +2973,26 @@ def status() -> str:
     "notes" lists things worth knowing (e.g. the service runs a different detector than this
     server would pick). No side effects."""
     gpu = vision.gpu_info()
-    omni = vision.omniparser_info(gpu)
-    omni["loaded"] = _OMNI.loaded
-    if _OMNI.load_seconds is not None:
-        omni["load_seconds"] = _OMNI.load_seconds
-    svc = vision_service.ping() if USE_SERVICE else None
-    omni["service"] = svc or {"running": False, "socket": vision_service.socket_path(),
-                              "enabled": USE_SERVICE,
-                              "note": "starts on the first local-mode parse_screen" if USE_SERVICE
-                                      else "disabled (GLOVEBOX_VISION_SERVICE=0): models load per server process"}
+    svc = vision_service.ping() if USE_SERVICE or REMOTE_VISION else None
+    if REMOTE_VISION:
+        omni = {**_remote_omni(svc), "loaded": False}
+        omni["service"] = svc or {"running": False, "socket": vision_service.socket_path(), "enabled": True,
+                                  "note": f"the host's service; start it {REMOTE_VISION_FIX}"}
+    else:
+        omni = vision.omniparser_info(gpu)
+        omni["loaded"] = _OMNI.loaded
+        if _OMNI.load_seconds is not None:
+            omni["load_seconds"] = _OMNI.load_seconds
+        omni["service"] = svc or {"running": False, "socket": vision_service.socket_path(),
+                                  "enabled": USE_SERVICE,
+                                  "note": "starts on the first local-mode parse_screen" if USE_SERVICE
+                                          else "disabled (GLOVEBOX_VISION_SERVICE=0): models load per server process"}
     notes = []
-    if svc and svc.get("loaded") and svc.get("detector") and svc["detector"] != omni["detector"]["effective"]:
+    if REMOTE_VISION:
+        notes.append("GPU vision is shared from the host: screenshots sent to parse_screen(source='vision') "
+                     "leave the container for the host's vision service"
+                     + ("" if svc else " — it is not running now, so vision falls back to OCR"))
+    elif svc and svc.get("loaded") and svc.get("detector") and svc["detector"] != omni["detector"]["effective"]:
         notes.append(f"the vision service runs the '{svc['detector']}' detector; this server would pick "
                      f"'{omni['detector']['effective']}' — restart it to switch: python vision_service.py stop")
     if CLIP_SYNC:
@@ -2977,7 +3014,7 @@ def status() -> str:
                      f"(focus_checked: false) — {A11Y_APT}")
     keyboard = {"host_layout": host_bridge.display_layout(HOST, _host_env()),
                 "override": os.environ.get("GLOVEBOX_KEYBOARD", "")}
-    v = vision.resolve(omni=omni, tess=tess, service_loaded=bool(svc and svc.get("loaded")))
+    v = vision.resolve(omni=omni, tess=tess, service_loaded=REMOTE_VISION or bool(svc and svc.get("loaded")))
     _VISION.update(value=v, at=time.time())
     tips.insert(0, "labelled UI: find_elements('Save') -> click_element(id) / act(id) / fill(element=id) instead of "
                    "guessing pixels — the app's accessibility information is asked first (exact labels, no GPU), "
@@ -2991,10 +3028,14 @@ def status() -> str:
     if IN_CONTAINER:
         container = {"view_url": os.environ.get("GLOVEBOX_VIEW_URL", "http://localhost:6080/vnc.html"),
                      "files": "/app/files is a folder on the host (container-data/files by default)",
-                     "browser_sandbox": _userns_ok()}
+                     "browser_sandbox": _userns_ok(),
+                     "vision": "host-service" if REMOTE_VISION else "in-container (OCR)",
+                     "apps": {"set": os.environ.get("GLOVEBOX_APPS", "browser"),
+                              "installed": [a for a in CONTAINER_APPS if shutil.which(a)]}}
         notes.append("running inside the Glovebox container: instances are windows on a virtual desktop — the "
                      f"person watches and uses them in a web browser at {container['view_url']}; only the apps "
-                     "installed in the image exist here, and file paths are container paths")
+                     "installed in the image exist here (container.apps.installed), and file paths are "
+                     "container paths")
         if not container["browser_sandbox"]:
             notes.append("browsers run with --no-sandbox here (Docker's default seccomp profile forbids the user "
                          "namespaces Chromium's sandbox needs), so the container is the only isolation layer: "

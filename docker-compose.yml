@@ -6,8 +6,9 @@ services:
   glovebox:
     build:
       context: .
-      # args:
-      #   EXTRA_APT: "libreoffice gimp inkscape"     # more apps in the image
+      args:
+        APPS: "${GLOVEBOX_APPS:-browser}"          # browser | basic | full
+        # EXTRA_APT: "thunderbird kate"            # any other Debian packages on top
     image: glovebox-mcp:local
     container_name: glovebox
     restart: unless-stopped

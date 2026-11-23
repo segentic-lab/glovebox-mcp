@@ -67,6 +67,36 @@ def socket_path() -> str:
     return os.path.join(TMP, "vision.sock")
 
 
+SHARE_DIRNAME = "glovebox-vision-share"
+
+
+def share_socket(path: str = None) -> str:
+    """Where the service's socket is ALSO reachable for a Glovebox container: a hard link in a
+    directory of its own next to the socket. The container mounts that directory (read-only) —
+    never the runtime dir itself, which holds the host session's other sockets. The link exists
+    only when the directory does: container.py creates it when vision sharing is asked for."""
+    return os.path.join(os.path.dirname(path or socket_path()), SHARE_DIRNAME, "vision.sock")
+
+
+def publish_share(path: str = None) -> bool:
+    """(Re)point the share link at the socket currently bound at `path`. False when sharing is not
+    set up (no share directory) or the link cannot be made (a different filesystem)."""
+    path = path or socket_path()
+    link = share_socket(path)
+    if not os.path.isdir(os.path.dirname(link)):
+        return False
+    try:
+        if os.path.lexists(link):
+            if os.stat(link).st_ino == os.stat(path).st_ino:
+                return True
+            os.unlink(link)
+        os.link(path, link)
+        return True
+    except OSError as e:
+        _log(f"could not publish the share link {link}: {e!r}")
+        return False
+
+
 def log_path() -> str:
     return os.path.join(TMP, "vision-service.log")
 
@@ -262,6 +292,7 @@ class Service:
             os.umask(old_umask)
         self.sock_ino = os.stat(self.path).st_ino
         self.sock.listen(16)
+        publish_share(self.path)          # a container that shares this service finds the new socket
         self.sock.settimeout(0.5)
         threading.Thread(target=self._idle_watchdog, daemon=True).start()
         if threading.current_thread() is threading.main_thread():
@@ -295,6 +326,12 @@ class Service:
                 # only OUR socket file: a newer service may already have bound this path
                 if os.stat(self.path).st_ino == self.sock_ino:
                     os.unlink(self.path)
+            except OSError:
+                pass
+            try:
+                link = share_socket(self.path)
+                if os.stat(link).st_ino == self.sock_ino:
+                    os.unlink(link)
             except OSError:
                 pass
             _log("stopped")
@@ -434,7 +471,7 @@ def stop(path: str = None) -> bool:
 # ---------- CLI ----------
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", nargs="?", default="status", choices=("serve", "status", "stop"))
+    ap.add_argument("cmd", nargs="?", default="status", choices=("serve", "start", "status", "stop"))
     ap.add_argument("--socket", default=None)
     ap.add_argument("--fake", action="store_true", help="no GPU: answer with one canned element (tests)")
     ap.add_argument("--idle-min", type=float, default=None)
@@ -443,6 +480,10 @@ def main(argv=None):
     if a.cmd == "serve":
         idle_min = a.idle_min if a.idle_min is not None else float(os.environ.get("GLOVEBOX_VISION_IDLE_MIN", DEFAULT_IDLE_MIN))
         Service(path, fake=a.fake, idle_s=idle_min * 60).serve_forever()
+    elif a.cmd == "start":             # detached, like the first local-mode parse does
+        st = ensure_running(path, fake=a.fake, idle_min=a.idle_min)
+        print(json.dumps(st or {"running": False, "socket": path, "log": log_path()}, indent=2))
+        return 0 if st else 1
     elif a.cmd == "status":
         st = ping(path)
         print(json.dumps(st or {"running": False, "socket": path}, indent=2))

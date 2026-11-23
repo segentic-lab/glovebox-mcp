@@ -10,20 +10,28 @@
 #                           writes the MCP config — needs only Docker (works on macOS/Windows hosts too)
 #   ./install.sh skill      only install the Claude Code skill (skills/glovebox/SKILL.md) into ~/.claude/skills
 #
-# Flags:  --no-skill          do not install the Claude Code skill (auto-installed when ~/.claude exists)
+# Flags:  --apps SET          container: browser (default) | basic (+ editor, files, viewers, terminal)
+#                             | full (+ LibreOffice, GIMP, Inkscape, Firefox, VLC)
+#         --vision host       container: share this machine's GPU vision service (Linux + ./install.sh local)
+#         --no-skill          do not install the Claude Code skill (auto-installed when ~/.claude exists)
 #         --no-screenparser   local mode: OmniParser's own detector only (no 153 MB ScreenParser download)
 #         --dev               also install the test dependencies (pytest)
 #
 # System packages need sudo — on Debian/Ubuntu the script runs apt itself; elsewhere it prints the line.
 # Idempotent: re-run it any time (it only downloads what is missing).
 set -e
-MODE=""; SKILL=1; SCREENPARSER=1; DEV=0
+MODE=""; SKILL=1; SCREENPARSER=1; DEV=0; APPS=browser; CVISION=""; NEXT=""
 for a in "$@"; do
+  if [[ -n "$NEXT" ]]; then printf -v "$NEXT" '%s' "$a"; NEXT=""; continue; fi
   case "$a" in
+    --apps) NEXT=APPS ;;
+    --apps=*) APPS="${a#*=}" ;;
+    --vision) NEXT=CVISION ;;
+    --vision=*) CVISION="${a#*=}" ;;
     --no-skill) SKILL=0 ;;
     --no-screenparser) SCREENPARSER=0 ;;
     --dev) DEV=1 ;;
-    -h|--help) sed -n 2,18p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,21p "$0"; exit 0 ;;
     *) MODE="$a" ;;
   esac
 done
@@ -47,16 +55,21 @@ if [[ "$MODE" == "container" ]]; then
   command -v docker >/dev/null 2>&1 || {
     echo "✗ Docker not found — install Docker Desktop (macOS/Windows) or docker.io (Linux), then re-run."; exit 1; }
   docker info >/dev/null 2>&1 || { echo "✗ Docker is installed but its daemon is not reachable — start Docker, then re-run."; exit 1; }
-  echo "▶ Building the image glovebox-mcp:local (several minutes the first time; ~1.8 GB) …"
-  docker build -t glovebox-mcp:local "$DIR"
+  case "$APPS" in browser|basic|full) ;; *) echo "✗ --apps must be browser, basic or full (got '$APPS')"; exit 1 ;; esac
+  case "$CVISION" in ""|host) ;; *) echo "✗ --vision must be 'host' (or omitted: OCR in the container)"; exit 1 ;; esac
+  echo "▶ Building the image glovebox-mcp:local, apps: $APPS (several minutes the first time; browser ~1.8 GB, full ~4 GB) …"
+  docker build -t glovebox-mcp:local --build-arg APPS="$APPS" "$DIR"
   PYBIN="$(command -v python3 || command -v python || true)"
   if [[ -n "$PYBIN" ]]; then
-    "$PYBIN" "$DIR/container.py" up
+    # an existing container keeps its old image and mounts: recreate it so the new ones apply
+    "$PYBIN" "$DIR/container.py" down >/dev/null
+    GLOVEBOX_CONTAINER_VISION="$CVISION" "$PYBIN" "$DIR/container.py" up
     # the launcher starts the container when it is not running, so the config survives a reboot
     CMD="\"$PYBIN\""; ARGS="[\"$DIR/container.py\"]"
   else
     echo "▶ No python3 on this machine: starting the container with docker compose."
-    (cd "$DIR" && docker compose up -d)
+    [[ -n "$CVISION" ]] && echo "  (--vision host needs the launcher, i.e. python3 on the host — skipped)"
+    (cd "$DIR" && docker compose up -d --force-recreate)
     CMD="\"docker\""; ARGS="[\"exec\", \"-i\", \"glovebox\", \"glovebox-server\"]"
   fi
   cat > mcp-config.json <<JSON
