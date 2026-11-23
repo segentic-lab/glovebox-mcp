@@ -8,6 +8,8 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-23
+
 ### Added
 - **Accessibility grounding.** `parse_screen`, `find_elements` and `wait_for_text` now ask the
   app before they look at pixels (`source="auto"`; `"a11y"` and `"vision"` force one side), and

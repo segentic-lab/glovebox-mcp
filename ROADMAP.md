@@ -63,7 +63,7 @@ a done action never reported as failed, per-instance locks, pre-validated keys, 
 service hardened, ScreenParser merge fixed, five new tools (find_elements, wait_for_text,
 browser, manage_window, start_app), the Claude Code skill. Details in CHANGELOG 0.5.0.
 
-## 0.7.0 — accessibility grounding + container mode (done 2026-11-23, unreleased)
+## 0.7.0 — accessibility grounding + container mode (released 2026-11-23)
 
 Came out of comparing glovebox with the other computer-use servers (computer-use-linux,
 desktop-touch-mcp, Open Computer Use, supercorp computer-use-mcp, Cua). Taken from them: ask
