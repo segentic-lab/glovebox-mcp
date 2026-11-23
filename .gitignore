@@ -22,3 +22,6 @@ OmniParser/
 
 # per-instance file staging folders (may hold user files — never commit)
 files/
+
+# container mode: staged files + browser profiles of the container (may hold logins)
+container-data/

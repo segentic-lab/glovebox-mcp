@@ -28,7 +28,9 @@ your filesystem. For OS-level isolation run glovebox inside a VM or container.
 ## Requirements
 
 - **Linux** — the sandbox nests a real X server (Xephyr), so it works even on **Wayland** hosts
-  (via Xwayland). Not macOS/Windows. Developed on Ubuntu; any modern Linux with the packages below.
+  (via Xwayland). Developed on Ubuntu; any modern Linux with the packages below.
+  **macOS / Windows, or a Linux you do not want to install packages on:** use
+  [container mode](#container-mode-docker) — it needs only Docker.
 - **Python 3.10+** and [`uv`](https://docs.astral.sh/uv/) (used for the virtualenv).
 - **System packages** — `xserver-xephyr` (Xephyr), `openbox`, `scrot`, `x11-utils`, `x11-xkb-utils`
   (xkbcomp: gives the sandbox your keyboard layout), `xdotool`, `wmctrl`, `xclip`, optional `at-spi2-core` + `gir1.2-atspi-2.0` + `python3-gi` (focus check in native apps) (+ `tesseract-ocr`
@@ -62,6 +64,56 @@ Re-running is safe: it only downloads what is missing.
 The requested mode is written to `.vision-mode` (`auto` unless you forced one; override per run
 with the `GLOVEBOX_VISION` env var). `python vision.py check` prints the same diagnosis `status()`
 returns (GPU, weights, detector, tesseract).
+
+### Container mode (Docker)
+
+The same server in a Linux container, for hosts that are not Linux (macOS, Windows) or when the
+sandbox should not have your files. Nothing but Docker is installed on the machine:
+
+```bash
+git clone https://github.com/segentic-lab/glovebox-mcp && cd glovebox-mcp && ./install.sh container
+# or, without the installer:   docker compose up -d --build
+```
+
+```
+container "glovebox"   (long-lived; survives agent sessions, restarts with Docker)
+  Xvfb :0 + openbox + noVNC      a desktop nobody sits at — you watch and use it in a browser:
+    │                            http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+    ├─ Xephyr :2  ── chromium    one window per instance, exactly as on a real desktop
+    └─ Xephyr :3  ── …
+  each agent session:  docker exec -i glovebox glovebox-server      (MCP over stdio)
+```
+
+MCP client config — either form:
+
+```jsonc
+// 1. the launcher: starts the container when it is not running (needs python3 on the host)
+{ "command": "python3", "args": ["/path/to/glovebox-mcp/container.py"] }
+// 2. plain Docker: the container must already be up (`docker compose up -d`)
+{ "command": "docker", "args": ["exec", "-i", "glovebox", "glovebox-server"] }
+```
+
+An existing native install switches with one line in its config: `"env": {"GLOVEBOX_MODE": "container"}`
+— `server.py` then hands the session to the container instead of driving your desktop.
+
+What is different from native mode — `status()` says so in `container` and `notes`:
+
+| | Native | Container |
+|---|---|---|
+| Isolation | display only: apps run as you, with your files | the container: apps see only `container-data/files` and `container-data/profiles` |
+| Apps | everything installed on your machine | what the image ships: Chromium. More with `docker build --build-arg EXTRA_APT="libreoffice gimp inkscape" …` |
+| Logins | your per-instance profiles in `profiles/` | `container-data/profiles` — log in once through the web viewer; kept across rebuilds |
+| Where you watch | windows on your desktop | the web viewer, published on `127.0.0.1` only (`GLOVEBOX_VNC_PASSWORD` adds a password) |
+| Grounding | accessibility, OCR, or OmniParser on your GPU | accessibility and OCR; the image has no GPU models |
+| File paths in replies | host paths | container paths (`/app/files/<N>/…` = `container-data/files/<N>/…` on the host) |
+
+Chromium runs with `--no-sandbox` in the container, because Docker's default seccomp profile
+forbids the user namespaces its sandbox needs; `status()` reports it (`container.browser_sandbox`).
+The container itself is then the isolation layer. Start the container with a seccomp profile that
+allows user namespaces and Glovebox keeps Chromium's sandbox on by itself.
+
+`python3 container.py up | down | status | build` manage the container; the image is built for
+amd64 and arm64 (Apple Silicon) and both are exercised in CI.
 
 ### Claude Code skill
 
@@ -279,6 +331,9 @@ in-progress downloads.
 | `GLOVEBOX_OCR_SCALE` | `2` | upscale factor before OCR in `basic` (1–4); UI text is too small for tesseract at 1x |
 | `GLOVEBOX_DETECTOR` | `auto` | detector inside `local`: `auto` = ScreenParser when installed, else OmniParser's; `omniparser` · `screenparser` force |
 | `DISPLAY` | `:1` | instance 1's display (set by `mcp-config.json`) |
+| `GLOVEBOX_MODE` | unset | `container` → `server.py` serves from the Docker container instead of this desktop |
+| `GLOVEBOX_CONTAINER` · `GLOVEBOX_IMAGE` · `GLOVEBOX_DATA` · `GLOVEBOX_VIEW_PORT` | `glovebox` · `glovebox-mcp:local` · `./container-data` · `6080` | container mode: name, image, host folder for files + profiles, host port of the web viewer |
+| `GLOVEBOX_DESKTOP_SIZE` · `GLOVEBOX_VNC_PASSWORD` | `1920x1080` · none | container mode: size of the virtual desktop, password for the viewer (applied when the container is created) |
 
 ## Maintenance (`local` mode)
 
@@ -319,7 +374,8 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - The agent's input and vision are **scoped to the sandbox display** — it does not see or control your real desktop.
 - The server process and the apps it launches run **as your user** (shell/file access, like any MCP
   server); only the **GUI control** is sandboxed to the Xephyr window. Files the agent saves, opens or
-  uploads are your real files. For OS-level isolation from your files, run it inside a VM or container.
+  uploads are your real files. For OS-level isolation from your files use
+  [container mode](#container-mode-docker): there the apps see only the two folders mounted into it.
 - You can watch everything live and close it instantly with `pkill Xephyr`.
 - Automate responsibly — only sites and services you are authorized to use.
 
@@ -335,7 +391,9 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - Launched apps are told to draw on the instance's X display (`XDG_SESSION_TYPE=x11`, `QT_QPA_PLATFORM=xcb`), LibreOffice gets a per-instance profile (`profiles/libreoffice-<N>`) so it cannot hand a document to a LibreOffice on the host, and `close_instance` ends the whole process group it started.
 - `a11y_focus.py` — AT-SPI helper for `fill()`'s focus check; runs under the system `python3` (needs `python3-gi`, `gir1.2-atspi-2.0`, `at-spi2-core` — `install.sh` adds them; without them `fill` still works and reports `focus_checked: false`).
 - `host_bridge.py` — per-instance host bridge: host keymap copy (AltGr fix) + clipboard mirroring (`keymap` / `serve` / `spawn` / `status` CLI).
-- `install.sh` — mode-aware installer (`none` / `basic` / `local`).
+- `install.sh` — mode-aware installer (`none` / `basic` / `local` / `container`).
+- `Dockerfile`, `docker/`, `docker-compose.yml` — the container image (virtual desktop + web viewer + the server).
+- `container.py` — stdlib-only launcher for container mode (`up` / `down` / `status` / `build`, or serve MCP through `docker exec`).
 - `start-display.sh` — launches the Xephyr sandbox (display + window manager + browser).
 - `AGENTS.md` — drop-in tool-usage instructions for the AI agent (paste into its system prompt).
 - `ROADMAP.md` — what is planned next (MCP SDK 2.x migration, …).

@@ -34,9 +34,28 @@ reported to MCP clients during the initialize handshake.
 - MCP tool annotations on all tools (`readOnlyHint` on the twelve that only look, wait or
   list; `destructiveHint: false` on launch/start/put_file/move_mouse/open_file).
 
+- **Container mode** — the same server in a Docker container, for macOS/Windows hosts and for
+  real isolation from the user's files. The container runs a virtual desktop (Xvfb + openbox)
+  with a web viewer (noVNC on `127.0.0.1:6080`); instances are Xephyr windows on it exactly as
+  on a real desktop, so multi-instance, the keymap copy and the clipboard bridge are unchanged.
+  The container is long-lived and each agent session attaches with
+  `docker exec -i glovebox glovebox-server`, so instances outlive sessions and agents share
+  one desktop. New: `Dockerfile`, `docker-compose.yml`, `container.py` (stdlib-only launcher:
+  `up`/`down`/`status`/`build`), `./install.sh container`, `GLOVEBOX_MODE=container` (an
+  existing install hands its sessions to the container), `status().container`. The image is
+  built and driven on amd64 and arm64 in CI (`tests/container_smoke.py`, 16 checks).
+- `.github/workflows/docker-publish.yml` — pushes the image to GHCR; manual trigger only.
+
 ### Changed
 - `find_elements`/`wait_for_text` no longer need a vision backend when the app exposes
   accessibility; `status().tips` and the AT-SPI note say so.
+
+### Known limits
+- Container: Chromium runs with `--no-sandbox` under Docker's default seccomp profile
+  (reported by `status()`); the image ships no GPU vision models; only Chromium is installed
+  unless the image is built with `EXTRA_APT`.
+- Accessibility: cross-origin iframes are counted (`frames_skipped`), not read; the browser's
+  own toolbar is not listed; Tk/Xlib apps expose nothing.
 
 ## [0.6.2] - 2026-11-20
 

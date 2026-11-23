@@ -1,0 +1,23 @@
+# Glovebox in a container:  docker compose up -d --build
+# Watch/use the desktop at http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+# MCP client config:        {"command": "docker", "args": ["exec", "-i", "glovebox", "glovebox-server"]}
+# (container.py / GLOVEBOX_MODE=container start this same container without compose.)
+services:
+  glovebox:
+    build:
+      context: .
+      # args:
+      #   EXTRA_APT: "libreoffice gimp inkscape"     # more apps in the image
+    image: glovebox-mcp:local
+    container_name: glovebox
+    restart: unless-stopped
+    shm_size: 1gb                      # Chromium needs more than Docker's 64 MB /dev/shm
+    ports:
+      - "127.0.0.1:6080:6080"          # the viewer, on this machine only
+    environment:
+      GLOVEBOX_DESKTOP_SIZE: "1920x1080"
+      # GLOVEBOX_VNC_PASSWORD: "change-me"   # ask the viewer for a password
+      # GLOVEBOX_KEYBOARD: "si"              # keyboard layout inside the instances
+    volumes:
+      - ./container-data/files:/app/files         # files/<N>/ staging folders (put_file, uploads, downloads)
+      - ./container-data/profiles:/app/profiles   # browser profiles: logins survive a rebuild

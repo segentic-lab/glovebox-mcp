@@ -60,7 +60,7 @@ local = [
 Repository = "https://github.com/segentic-lab/glovebox-mcp"
 
 [tool.setuptools]
-py-modules = ["server", "vision", "vision_service", "host_bridge", "a11y", "a11y_focus", "a11y_tree", "_paths", "_version"]
+py-modules = ["server", "vision", "vision_service", "host_bridge", "a11y", "a11y_focus", "a11y_tree", "container", "_paths", "_version"]
 
 [tool.setuptools.dynamic]
 # single source of truth: _version.py (reported to MCP clients in the initialize handshake)

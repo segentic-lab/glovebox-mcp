@@ -57,6 +57,15 @@ from contextlib import contextmanager
 os.environ.setdefault("DISPLAY", ":1")
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOST = os.environ.get("GLOVEBOX_HOST_DISPLAY", ":0")
+IN_CONTAINER = os.environ.get("GLOVEBOX_IN_CONTAINER", "").strip().lower() in ("1", "true", "yes", "on")
+
+if (__name__ == "__main__" and os.environ.get("GLOVEBOX_MODE", "").strip().lower() == "container"
+        and not IN_CONTAINER):
+    # Container mode: this process only hands its stdio to the server inside the Docker
+    # container (starting the container if needed) — before the heavy imports, which a machine
+    # that runs Glovebox ONLY in a container need not even have installed.
+    import container
+    container.exec_server()
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -704,6 +713,22 @@ def _annotate(img, elems, boxes, path):
     im.save(path)
 
 
+_USERNS = {}
+
+
+def _userns_ok() -> bool:
+    """Can this process create a user namespace? Chromium's own sandbox needs one, and Docker's
+    default seccomp profile forbids it — the browser then refuses to start. Checked once; when it
+    is not possible the browser is started with --no-sandbox (inside a container, whose own
+    isolation then is the only layer) and status() says so."""
+    if "ok" not in _USERNS:
+        try:
+            _USERNS["ok"] = subprocess.run(["unshare", "-U", "true"], capture_output=True, timeout=5).returncode == 0
+        except Exception:
+            _USERNS["ok"] = False
+    return _USERNS["ok"]
+
+
 def _app_env_args(n, command):
     """Env + argv to launch a GUI `command` on instance n's display. Chromium-family browsers get
     X11 flags, a per-instance profile, and a CDP debug port; other GTK apps get D-Bus isolation so
@@ -741,6 +766,10 @@ def _app_env_args(n, command):
             args += ["--ozone-platform=x11", "--disable-gpu", "--no-first-run",
                      "--no-default-browser-check", "--start-maximized",
                      f"--remote-debugging-port={_cdp_port(n)}", f"--user-data-dir={prof}"]
+            if IN_CONTAINER:
+                args.append("--disable-dev-shm-usage")       # Docker's /dev/shm is 64 MB by default
+                if not _userns_ok():
+                    args.append("--no-sandbox")              # see _userns_ok: the container is the sandbox
     else:
         appenv.pop("WAYLAND_DISPLAY", None)
         appenv.setdefault("GDK_BACKEND", "x11")
@@ -2898,7 +2927,19 @@ def status() -> str:
                       "screenshot(region=…) and click(x, y); ./install.sh basic adds OCR for them"))
     tips.append("after an action pass observe='elements' for the element list alone (no image), and act(id) to "
                 "press or set a control without moving the pointer")
-    return _ok("status", version=__version__, host_display=HOST, tmp_dir=TMP,
+    container = None
+    if IN_CONTAINER:
+        container = {"view_url": os.environ.get("GLOVEBOX_VIEW_URL", "http://localhost:6080/vnc.html"),
+                     "files": "/app/files is a folder on the host (container-data/files by default)",
+                     "browser_sandbox": _userns_ok()}
+        notes.append("running inside the Glovebox container: instances are windows on a virtual desktop — the "
+                     f"person watches and uses them in a web browser at {container['view_url']}; only the apps "
+                     "installed in the image exist here, and file paths are container paths")
+        if not container["browser_sandbox"]:
+            notes.append("browsers run with --no-sandbox here (Docker's default seccomp profile forbids the user "
+                         "namespaces Chromium's sandbox needs), so the container is the only isolation layer: "
+                         "start it with `--security-opt seccomp=<chrome profile>` to get Chromium's sandbox back")
+    return _ok("status", version=__version__, host_display=HOST, tmp_dir=TMP, container=container,
                cleanup_on_exit=_truthy(os.environ.get("GLOVEBOX_CLEANUP_ON_EXIT", "")),
                vision={**v, "gpu": gpu, "omniparser": omni, "tesseract": tess},
                instances=_instance_rows(), keyboard=keyboard,

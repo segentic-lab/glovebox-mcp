@@ -27,7 +27,7 @@ jobs:
       - name: Install package + dev deps (+ basic vision so the OCR path is tested)
         run: pip install -e ".[dev,basic]"
       - name: Compile check
-        run: python -m compileall -q server.py vision.py vision_service.py host_bridge.py a11y.py a11y_focus.py a11y_tree.py _paths.py _version.py
+        run: python -m compileall -q server.py vision.py vision_service.py host_bridge.py a11y.py a11y_focus.py a11y_tree.py container.py _paths.py _version.py
       - name: Vision self-check (no GPU here -> must resolve to basic, not crash)
         run: python vision.py check
       - name: Run tests (smoke + display e2e)
@@ -39,3 +39,31 @@ jobs:
           name: glovebox-frames-py${{ matrix.python-version }}
           path: /tmp/glovebox-*/
           if-no-files-found: ignore
+
+  container:
+    # Container mode, on both architectures people run Docker on (arm64 = Apple Silicon hosts):
+    # build the image, then a real MCP session through container.py into it.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the image
+        run: docker build -t glovebox-mcp:local .
+      - name: MCP client for the smoke test (the server itself runs in the container)
+        run: pip install "mcp[cli]>=2.0,<3"
+      - name: Smoke test through the launcher
+        env:
+          GLOVEBOX_CONTAINER: glovebox-ci
+          GLOVEBOX_DATA: ${{ runner.temp }}/glovebox-data
+        run: python tests/container_smoke.py
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          docker logs glovebox-ci || true
+          docker exec glovebox-ci sh -c 'tail -n 40 /tmp/*.log /tmp/glovebox-*/*.log' || true

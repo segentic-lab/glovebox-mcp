@@ -1,0 +1,20 @@
+# everything the image does not need — and everything that must never be baked into one
+.git
+.venv
+__pycache__
+*.pyc
+*.egg-info
+.pytest_cache
+OmniParser
+files
+profiles
+chrome-profile
+container-data
+.mcp.json
+mcp-config.json
+.vision-mode
+.env
+.dev.vars
+CLAUDE.md
+tests
+assets

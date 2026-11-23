@@ -24,6 +24,12 @@ in one call.
 
 ## Mental model
 
+- `status()` → `"container"` is set when the server runs in **container mode**: the instances are
+  windows on a virtual desktop the person watches in a web browser (`container.view_url`), only
+  the apps in the image exist (a browser by default), there is no GPU vision (accessibility and
+  OCR ground you), and file paths are container paths — `put_file` / `list_files` /
+  `upload_file` work the same, the person finds the files in `container-data/files/<N>/`.
+
 - Each **instance** (`instance=N`, default `1`) is one app window on its own display. You **cannot
   see it** unless you take a `screenshot` or `parse_screen`. Always look before you act.
 - Work **observe → act → verify**. Never fire a sequence of clicks without confirming the screen

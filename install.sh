@@ -6,6 +6,8 @@
 #   ./install.sh none       lightest: no local models — the agent reads screenshots itself
 #   ./install.sh basic      Tesseract OCR (text + coords), no GPU/torch
 #   ./install.sh local      OmniParser + ScreenParser grounding on the GPU (typed elements), heaviest/best
+#   ./install.sh container  run Glovebox in a Docker container instead: builds the image, starts the container,
+#                           writes the MCP config — needs only Docker (works on macOS/Windows hosts too)
 #   ./install.sh skill      only install the Claude Code skill (skills/glovebox/SKILL.md) into ~/.claude/skills
 #
 # Flags:  --no-skill          do not install the Claude Code skill (auto-installed when ~/.claude exists)
@@ -21,7 +23,7 @@ for a in "$@"; do
     --no-skill) SKILL=0 ;;
     --no-screenparser) SCREENPARSER=0 ;;
     --dev) DEV=1 ;;
-    -h|--help) sed -n 2,16p "$0"; exit 0 ;;
+    -h|--help) sed -n 2,18p "$0"; exit 0 ;;
     *) MODE="$a" ;;
   esac
 done
@@ -39,12 +41,49 @@ install_skill() {
 }
 
 if [[ "$MODE" == "skill" ]]; then install_skill; exit 0; fi
+
+# ---- container mode: nothing is installed on this machine except the image ----
+if [[ "$MODE" == "container" ]]; then
+  command -v docker >/dev/null 2>&1 || {
+    echo "✗ Docker not found — install Docker Desktop (macOS/Windows) or docker.io (Linux), then re-run."; exit 1; }
+  docker info >/dev/null 2>&1 || { echo "✗ Docker is installed but its daemon is not reachable — start Docker, then re-run."; exit 1; }
+  echo "▶ Building the image glovebox-mcp:local (several minutes the first time; ~1.8 GB) …"
+  docker build -t glovebox-mcp:local "$DIR"
+  PYBIN="$(command -v python3 || command -v python || true)"
+  if [[ -n "$PYBIN" ]]; then
+    "$PYBIN" "$DIR/container.py" up
+    # the launcher starts the container when it is not running, so the config survives a reboot
+    CMD="\"$PYBIN\""; ARGS="[\"$DIR/container.py\"]"
+  else
+    echo "▶ No python3 on this machine: starting the container with docker compose."
+    (cd "$DIR" && docker compose up -d)
+    CMD="\"docker\""; ARGS="[\"exec\", \"-i\", \"glovebox\", \"glovebox-server\"]"
+  fi
+  cat > mcp-config.json <<JSON
+{
+  "mcpServers": {
+    "glovebox": {
+      "command": $CMD,
+      "args": $ARGS
+    }
+  }
+}
+JSON
+  if [[ ! -f .mcp.json ]]; then cp mcp-config.json .mcp.json; echo "▶ wrote .mcp.json (Claude Code picks it up in this folder; copy it to other projects)"; fi
+  [[ "$SKILL" == 1 && -d "$HOME/.claude" ]] && install_skill
+  echo "✓ Done. Glovebox runs in the container 'glovebox'. Wrote mcp-config.json."
+  echo "  Watch and use the sandbox desktop at http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
+  echo "  Files you stage and browser logins live in $DIR/container-data/ (kept when the container is rebuilt)."
+  exit 0
+fi
+
 if [[ "$MODE" != "auto" && "$MODE" != "none" && "$MODE" != "basic" && "$MODE" != "local" ]]; then
-  echo "Usage: ./install.sh [auto|none|basic|local|skill] [--no-skill] [--no-screenparser] [--dev]"
+  echo "Usage: ./install.sh [auto|none|basic|local|container|skill] [--no-skill] [--no-screenparser] [--dev]"
   echo "  auto   — probe the GPU, install the best backend this machine can run (default)"
   echo "  none   — no local grounding model (the agent's own vision); lightest, instant install"
   echo "  basic  — Tesseract OCR, no GPU"
   echo "  local  — OmniParser + ScreenParser on the GPU (best grounding; ~4 GB downloads)"
+  echo "  container — run it in a Docker container (only Docker needed; macOS/Windows/Linux)"
   echo "  skill  — only the Claude Code skill"
   exit 1
 fi

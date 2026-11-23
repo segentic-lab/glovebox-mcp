@@ -31,7 +31,8 @@ unblocks you. Read `fix` and do what it says before trying anything else.
 
 ## First moves
 
-1. `status()` — version, the vision backend actually in use (`vision.effective`:
+1. `status()` — version, whether you are in **container mode** (`container`: the person watches
+   a web viewer, only the image's apps exist, paths are container paths), the vision backend actually in use (`vision.effective`:
    `local` = OmniParser/ScreenParser on the GPU, `basic` = tesseract OCR, `none`
    = your own eyes), running instances, missing system deps, `notes`.
 2. `list_instances()` — what is already running (other agents' windows show
