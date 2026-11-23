@@ -122,7 +122,7 @@ def test_handshake_reports_project_version(x99):
             assert init.server_info.name == "glovebox"
             assert init.server_info.version == __version__
             tools = await s.list_tools()
-            assert len(tools.tools) == 30
+            assert len(tools.tools) == 31
     asyncio.run(run())
 
 
@@ -742,6 +742,150 @@ def test_copied_keymap_stays_valid_for_xkbcommon_after_typing(x99):
                 await asyncio.sleep(0.3)
                 after = _xkbcommon_accepts(f":{n}")
                 assert after["core"] and after["valid"] >= 3, after
+            finally:
+                await s.call_tool("close_instance", {"instance": n})
+    asyncio.run(run())
+
+
+A11Y_FORM = '''
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+w = Gtk.Window(title="a11y form"); w.set_default_size(420, 300)
+b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10); w.add(b)
+e = Gtk.Entry(); e.get_accessible().set_name("Ime"); b.add(e)
+c = Gtk.CheckButton(label="Strinjam se"); b.add(c)
+out = Gtk.Label(label="-")
+s = Gtk.Button(label="Shrani")
+s.connect("clicked", lambda *_: out.set_text("saved " + e.get_text() + (" yes" if c.get_active() else " no")))
+b.add(s)
+gone = Gtk.Button(label="Skrij me"); gone.connect("clicked", lambda *_: gone.destroy()); b.add(gone)
+d = Gtk.Button(label="Onemogočen"); d.set_sensitive(False); b.add(d)
+b.add(out)
+w.connect("destroy", Gtk.main_quit); w.show_all(); Gtk.main()
+'''
+
+
+@pytest.mark.skipif(not (shutil.which("Xephyr") and shutil.which("xprop") and shutil.which("dbus-run-session")
+                         and _system_gtk_atspi()), reason="Xephyr, xprop, dbus-run-session or system PyGObject (Gtk+Atspi) missing")
+def test_native_app_is_read_and_operated_through_accessibility(x99, tmp_path):
+    """With vision off, a GTK app is still found by label (AT-SPI), operated without the pointer
+    (act) and with it (click_element), and an element that disappeared is refused as stale."""
+    script = tmp_path / "a11y_form.py"
+    script.write_text(A11Y_FORM)
+
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
+            p = payload(await s.call_tool("launch_app", {"command": f"/usr/bin/python3 {script}", "size": "700x500"}))
+            n = p["instance"]
+
+            async def find(q, **kw):
+                return payload(await s.call_tool("find_elements", {"query": q, "instance": n, **kw}))
+            try:
+                f = {}
+                for _i in range(40):
+                    r = await s.call_tool("find_elements", {"query": "shrani", "instance": n})
+                    f = payload(r)
+                    if not r.is_error and f.get("count"):
+                        break
+                    await asyncio.sleep(0.5)
+                if not f.get("count"):
+                    pytest.skip("no AT-SPI bus in this environment: " + str(f.get("error") or f.get("a11y_unavailable")))
+                assert f["source"] == "at-spi" and f["elements"][0]["type"] == "button"
+                save = f["elements"][0]["id"]
+                # set a value and toggle a checkbox without pointer or keyboard
+                name = (await find("ime", type="input"))["elements"][0]
+                r = await s.call_tool("act", {"element": name["id"], "action": "set_value", "value": "Ana Kovač", "instance": n})
+                p = payload(r)
+                assert not r.is_error and p["method"] == "at-spi" and p["verified"] is True and p["after"]["value"] == "Ana Kovač"
+                box = (await find("strinjam"))["elements"][0]
+                assert box["type"] == "checkbox"
+                p = payload(await s.call_tool("act", {"element": box["id"], "instance": n}))
+                assert "checked" not in p["before"]["states"] and "checked" in p["after"]["states"]
+                # the pointer path uses the same ids, located again at click time
+                save = (await find("shrani"))["elements"][0]["id"]
+                r = await s.call_tool("click_element", {"id": save, "instance": n})
+                assert not r.is_error
+                w = payload(await s.call_tool("wait_for_text", {"text": "saved Ana Kovač yes", "instance": n, "timeout_ms": 5000}))
+                assert w["satisfied"] is True and w["source"] == "at-spi"
+                # refusals: disabled, and an element that is gone
+                dis = (await find("onemogočen"))["elements"][0]
+                assert dis["interactive"] is False and "disabled" in dis["states"]
+                r = await s.call_tool("act", {"element": dis["id"], "instance": n})
+                assert r.is_error and "disabled" in payload(r)["error"]
+                hide = (await find("skrij"))["elements"][0]["id"]
+                assert not (await s.call_tool("act", {"element": hide, "instance": n})).is_error
+                await asyncio.sleep(0.5)
+                for tool, args in (("act", {"element": hide}), ("click_element", {"id": hide})):
+                    r = await s.call_tool(tool, {**args, "instance": n})
+                    assert r.is_error and payload(r).get("stale") is True, (tool, payload(r))
+                # the element list alone, in the same call as an action
+                r = await s.call_tool("press_keys", {"keys": "Tab", "instance": n, "observe": "elements"})
+                p = payload(r)
+                assert len(r.content) == 1 and p["observed"] == "elements" and p["parse"]["source"] == "at-spi"
+            finally:
+                await s.call_tool("close_instance", {"instance": n})
+    asyncio.run(run())
+
+
+A11Y_PAGE = ("data:text/html,<title>t</title><h1>Obrazec</h1><label for=n>Ime</label> <input id=n>"
+             "<label><input type=checkbox id=c> Strinjam se</label>"
+             "<select aria-label='Drzava'><option>Slovenija<option>Hrvaska</select>"
+             "<button onclick=\"document.getElementById('o').textContent='saved '+n.value+' '+c.checked\">Shrani</button>"
+             "<p id=o></p><div style='height:3000px'></div>"
+             "<button onclick=\"document.title='far'\">Spodaj</button>")
+BROWSER = next((b for b in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable") if shutil.which(b)), None)
+
+
+@pytest.mark.skipif(not (shutil.which("Xephyr") and BROWSER), reason="Xephyr or a Chromium-family browser missing")
+def test_browser_page_is_read_and_operated_through_the_dom(x99):
+    """With vision off, a page's controls are found by accessible name, a field is filled by id,
+    a control is pressed without the pointer, and an element far below the fold is scrolled in."""
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
+            p = payload(await s.call_tool("launch_app", {"command": f"{BROWSER} about:blank", "size": "1000x700"}))
+            n = p["instance"]
+
+            async def find(q, **kw):
+                return payload(await s.call_tool("find_elements", {"query": q, "instance": n, **kw}))
+            try:
+                for _i in range(40):
+                    r = await s.call_tool("browser", {"action": "navigate", "url": A11Y_PAGE, "instance": n})
+                    if not r.is_error:
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    pytest.skip("the browser did not come up with a DevTools port here: " + payload(r).get("error", ""))
+                f = await find("ime", type="input")
+                assert f["source"] == "browser-dom" and f["count"] == 1 and f["elements"][0]["role"] == "textbox"
+                r = await s.call_tool("fill", {"text": "Ana", "element": f["elements"][0]["id"], "instance": n})
+                p = payload(r)
+                assert not r.is_error and p["focus_checked"] == "browser-dom" and p["verified"] is True
+                box = (await find("strinjam", type="checkbox"))["elements"][0]
+                p = payload(await s.call_tool("act", {"element": box["id"], "instance": n}))
+                assert p["method"] == "cdp-input" and "checked" in p["after"]["states"]
+                sel = (await find("drzava"))["elements"][0]
+                assert sel["type"] == "select" and sel["options"] == ["Slovenija", "Hrvaska"]
+                p = payload(await s.call_tool("act", {"element": sel["id"], "action": "set_value", "value": "Hrvaska", "instance": n}))
+                assert p["verified"] is True
+                r = await s.call_tool("act", {"element": sel["id"], "action": "set_value", "value": "Avstrija", "instance": n})
+                assert r.is_error and payload(r)["options"] == ["Slovenija", "Hrvaska"]
+                save = (await find("shrani"))["elements"][0]
+                r = await s.call_tool("click_element", {"id": save["id"], "instance": n})
+                assert payload(r)["hit"]["name"] == "Shrani"
+                w = payload(await s.call_tool("wait_for_text", {"text": "saved Ana true", "instance": n, "timeout_ms": 5000}))
+                assert w["satisfied"] is True
+                # below the fold: found, flagged, scrolled in by the click itself
+                far = (await find("spodaj"))["elements"][0]
+                assert far["onscreen"] is False and far["center"] is None
+                p = payload(await s.call_tool("click_element", {"id": far["id"], "instance": n}))
+                assert p["scrolled"] is True
+                p = payload(await s.call_tool("browser", {"action": "eval", "js": "document.title", "instance": n}))
+                assert p["result"] == "far"
+                # after a navigation the old ids are refused, not clicked blindly
+                await s.call_tool("browser", {"action": "navigate", "url": A11Y_PAGE, "instance": n})
+                r = await s.call_tool("click_element", {"id": far["id"], "instance": n})
+                assert r.is_error and payload(r)["stale"] is True
             finally:
                 await s.call_tool("close_instance", {"instance": n})
     asyncio.run(run())

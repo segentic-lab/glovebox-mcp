@@ -44,6 +44,25 @@ in one call.
 
 ## Grounding: how to know WHERE to click
 
+`find_elements` / `parse_screen` ask the **app** first and the pixels second; every reply says who
+answered in `"source"`.
+
+- **`browser-dom` (a Chromium-family browser) / `at-spi` (GTK, Qt, LibreOffice)** — the app's own
+  accessibility information: exact labels, real types (button, link, input, checkbox, select, tab,
+  item, text), `states` (disabled, checked, expanded, focused, password…), `value`, a select's
+  `options`. No GPU, no OCR errors. `find_elements("Shrani")` also finds elements **scrolled out
+  of view** (`"onscreen": false`); `click_element(id)` scrolls them in. These ids are handles: they
+  are looked up again before each use, so a moved element is still hit and a vanished one fails
+  with `stale: true` (then `find_elements` again) instead of clicking something else.
+  **`act(id)`** presses a control and **`act(id, "set_value", value)`** sets a field, a `<select>`
+  option, a checkbox (`"true"`/`"false"`) or a slider with no pointer and no coordinates; compare
+  `before`/`after` in the reply. Use `fill(element=id)` instead when the page must see real
+  keystrokes (autocomplete, per-key validation).
+- What accessibility does **not** see: canvases, games, Tk/Xlib apps, text inside images,
+  cross-origin iframes (`frames_skipped`), the browser's own toolbar. Then the reply's `source` is
+  `vision` (with `a11y_unavailable` saying why) and the rules below apply; force it with
+  `source="vision"`.
+
 `status()` / `get_screen_size(instance)` report the effective `"vision"` backend.
 
 - **`local` / `basic`** — call `parse_screen(instance)` to get numbered `elements` (in `local` with the
@@ -65,6 +84,9 @@ in one call.
 | See the screen / zoom / cheaper shot | `screenshot(instance)` · `screenshot(instance, region="x,y,w,h")` · `screenshot(instance, scale=0.5, format="jpeg")` |
 | List elements + coords | `parse_screen(instance)` → `click_element(id, instance)` |
 | Find one element by its text | `find_elements("Sign in", instance, type="button")` → `click_element(id)` — no 300-element scan |
+| Press / toggle without the pointer | `act(id, instance)` — returns `before`/`after` states (`checked`, `expanded`, …) |
+| Set a value without typing | `act(id, "set_value", "Hrvaška", instance)` — text, select option, `"true"`/`"false"`, slider number; `verified` says it stuck |
+| See what changed, without an image | any action with `observe="elements"` → the element list only |
 | Wait for a page/dialog by its text | `wait_for_text("Welcome", instance)` → `satisfied` / `timed_out` (honest) |
 | Click a known pixel | `click(x, y, instance, observe="screenshot")` — `count=2` double, `modifiers="ctrl"` ctrl-click |
 | Set a form field (click + focus check + replace + read back) | `fill("Nadja Kovačič", x, y, instance)` or `fill("…", element=<id>)` — a miss or an unannounced password field fails with nothing typed; passwords need `allow_password=True` |
@@ -90,10 +112,9 @@ in one call.
 
 ## Rules that will bite you if ignored
 
-- **Prefer labels to pixels** — with a vision backend, `find_elements("Objavi")` →
-  `click_element(id)` and `wait_for_text("Shranjeno")` beat guessing coordinates and sleeping.
-  If your client loads tools lazily, load `find_elements`, `click_element`, `wait_for_text` and
-  `fill` up front.
+- **Prefer labels to pixels** — `find_elements("Objavi")` → `click_element(id)` / `act(id)` and `wait_for_text("Shranjeno")` beat guessing coordinates and sleeping.
+  If your client loads tools lazily, load `find_elements`, `click_element`, `act`, `wait_for_text`
+  and `fill` up front.
 - **Read `hit` after a browser click** — `click`/`double_click`/`click_element`/`fill` return the
   DOM element that was under the point (`role`, `name`, `checked_before`, `href`;
   `{"role": "browser-ui"}` = toolbar/tab strip). If it is not what you meant, you misclicked.

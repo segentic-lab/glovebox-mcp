@@ -60,10 +60,12 @@ HOST = os.environ.get("GLOVEBOX_HOST_DISPLAY", ":0")
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 from mcp.server.mcpserver.utilities.types import Image as MCPImage
 import mss
 from PIL import Image, ImageChops, ImageDraw
 
+import a11y
 import host_bridge
 import vision
 import vision_service
@@ -75,7 +77,8 @@ TMP = tmp_dir()   # annotated frames + app/Xephyr logs; 0700, ownership-checked 
 mcp = MCPServer("glovebox", version=__version__,
                 instructions="Sandboxed computer use: drive real apps inside nested X11 windows. Call status() "
                              "first; every tool returns JSON with ok/fix. Prefer labels over pixel guesses: "
-                             "find_elements('Save') -> click_element(id), wait_for_text('Done') instead of "
+                             "find_elements('Save') -> click_element(id) or act(id) (the app's accessibility "
+                             "information is asked first, vision second), wait_for_text('Done') instead of "
                              "sleeping, fill(text, x, y) to set a form field and read it back, "
                              "browser(action='text') for exact page text. click() reports the element it "
                              "hit in browsers. See AGENTS.md in the repo.")
@@ -85,6 +88,8 @@ _LAST = {}       # N -> {element id -> (cx, cy)} from that instance's last parse
 _GEOM = {}       # N -> (W, H, read_at) cached display geometry (bounds checks; refreshed after GEOM_TTL)
 _LAUNCHED = set()  # instances started by THIS process (for optional cleanup on exit)
 _LAST_EL = {}    # N -> {"typed": bool, "elements": {id: element}} from the last parse (fill's label check)
+_SNAP = defaultdict(int)   # N -> id of that instance's latest accessibility snapshot
+A11Y_MIN = 3     # source='auto': fewer accessibility elements than this -> use vision instead
 _A11Y = {"at": 0.0, "python": None}   # interpreter that can import Atspi (re-probed every 60 s)
 A11Y_HELPER = os.path.join(HERE, "a11y_focus.py")
 A11Y_APT = "sudo apt install at-spi2-core gir1.2-atspi-2.0 python3-gi"
@@ -164,6 +169,13 @@ def _parse_local(img, box_threshold, ann, instance):
     if USE_SERVICE:
         meta["fallback_reason"] = "the vision service failed less than 60 s ago (retrying after that)"
     return elems, meta
+
+
+# ---------- tool annotations (clients use them to decide what needs approval) ----------
+# openWorldHint is true throughout: the apps being driven reach the web and the user's files.
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)                 # look, wait, list
+_ADDITIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)   # start, move, stage
+_ACTS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True)        # input into a live app
 
 
 # ---------- response contract ----------
@@ -796,7 +808,7 @@ def _resolve_path(action, n, filepath):
 
 
 # ---------- instance management ----------
-@mcp.tool()
+@mcp.tool(annotations=_ADDITIVE)
 def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
     """Launch a GUI app in its OWN new Xephyr display/window and return its instance id.
 
@@ -903,7 +915,7 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
                keyboard=keyboard, clipboard_sync=clip_sync)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_instances() -> str:
     """List all running instances (app windows): id, display, name, command, title, launched_here.
 
@@ -917,7 +929,7 @@ def list_instances() -> str:
     return _ok("list_instances", count=len(rows), instances=rows)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def close_instance(instance: int = 0, all_launched: bool = False) -> str:
     """Close an instance: kill its app + its Xephyr display, and verify it actually went down.
 
@@ -952,7 +964,7 @@ def close_instance(instance: int = 0, all_launched: bool = False) -> str:
           instance=n)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ADDITIVE)
 def start_app(command: str, instance: int = 1) -> str:
     """Start ANOTHER app on an existing instance's display (same window/cursor) — e.g. a second
     tool next to the browser, or a restart of an app that quit. For a new, separate window use
@@ -977,7 +989,7 @@ def start_app(command: str, instance: int = 1) -> str:
 
 
 # ---------- per-instance control ----------
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def get_screen_size(instance: int = 1) -> str:
     """Screen size of an instance + the active vision backend and server version.
 
@@ -993,7 +1005,7 @@ def get_screen_size(instance: int = 1) -> str:
                version=__version__)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: str = "png",
                quality: int = 80):
     """Screenshot of an instance's display — the ONLY way to see the screen; always look before you act.
@@ -1030,13 +1042,111 @@ def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: 
     return [meta, im]
 
 
-def _do_parse(instance: int = 1, box_threshold: float = 0.05, granularity: str = "line") -> dict:
+def _a11y_env(n):
+    """(python, env) for running an AT-SPI helper against instance n's OWN accessibility bus, or
+    (None, why). The bus address is a property of the display's root window; the host's session
+    bus is removed from the environment so the host's widgets can never be reported."""
+    py = _a11y_python()
+    if not py:
+        return None, f"AT-SPI bindings are not installed on the host ({A11Y_APT})"
+    try:
+        r = subprocess.run(["xprop", "-root", "-display", _disp(n), "AT_SPI_BUS"], capture_output=True,
+                           text=True, timeout=3)
+    except Exception as e:
+        return None, f"the accessibility bus lookup failed ({type(e).__name__})"
+    m = re.search(r'=\s*"(.+)"', r.stdout or "")
+    if not m:
+        return None, "no accessibility bus on this display (the app does not speak AT-SPI)"
+    env = {**_env(n), "AT_SPI_BUS_ADDRESS": m.group(1)}
+    env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    return py, env
+
+
+def _a11y_parse(n):
+    """(elements, meta) from the app's own accessibility information, or (None, why).
+    A Chromium-family browser answers over CDP (the active tab's DOM); anything else is asked
+    over the display's AT-SPI bus. Elements carry private keys (box, path) the caller strips."""
+    snap = _SNAP[n] = _SNAP[n] + 1
+    browser_why = None
+    try:
+        with _cdp(_cdp_port(n), timeout=8) as (cmd, _target, _pages):
+            d = a11y.browser_snapshot(cmd, snap)
+        meta = {"source": "browser-dom", "snapshot": snap, "page": {"url": d.get("url", ""), "title": d.get("title", "")}}
+        if d.get("frames_skipped"):
+            meta["frames_skipped"] = d["frames_skipped"]
+        if d.get("truncated"):
+            meta["a11y_truncated"] = True
+        if d["elements"]:
+            return d["elements"], meta
+        browser_why = "the page exposes no elements"
+    except CdpTimeout:
+        browser_why = "the page did not answer in time (its main thread is busy)"
+    except Exception:
+        pass                                         # no CDP browser on this instance: a native app
+    py, env = _a11y_env(n)
+    if not py:
+        return None, browser_why or env
+    try:
+        d = a11y.atspi_call(py, env, "dump")
+    except RuntimeError as e:
+        return None, browser_why or str(e)
+    if not d.get("elements"):
+        return None, browser_why or "the app exposes no elements over AT-SPI (canvas, game or Xlib-only app)"
+    meta = {"source": "at-spi", "snapshot": snap, "apps": d.get("apps", [])}
+    if d.get("truncated"):
+        meta["a11y_truncated"] = True
+    return d["elements"], meta
+
+
+_EL_PRIVATE = ("box", "path")
+
+
+def _public(e: dict) -> dict:
+    out = {k: v for k, v in e.items() if k not in _EL_PRIVATE}
+    if out.get("onscreen"):
+        out.pop("onscreen")                         # only the exceptions are flagged
+    return out
+
+
+def _do_parse(instance: int = 1, box_threshold: float = 0.05, granularity: str = "line", source: str = "auto",
+              keep_all: bool = False) -> dict:
     """One parse of an instance's screen → the parse_screen payload (dict). Runs under the
-    instance lock: the annotated image and _LAST ids belong to one parse at a time."""
+    instance lock: the annotated image and _LAST ids belong to one parse at a time.
+    source='auto' asks the app first (accessibility: exact labels, no GPU) and falls back to
+    vision; keep_all adds "_all" (every accessibility element, off-screen ones included)."""
     n = _require("parse_screen", instance)
+    if source not in ("auto", "a11y", "vision"):
+        _fail("parse_screen", f"unknown source '{source}'", fix="use source='auto' | 'a11y' | 'vision'", instance=n)
     v = _vision()
     mode = v["effective"]
     base = {"ok": True, "action": "parse_screen", "instance": n, "vision": mode}
+    if source != "vision":
+        with _ilock(n):
+            elems, meta = _a11y_parse(n)
+            if elems is not None:
+                shown = [e for e in elems if e.get("onscreen")]
+                if source == "auto" and len(elems) < A11Y_MIN and mode != "none":
+                    elems, meta = None, (f"only {len(elems)} element(s) are exposed through accessibility "
+                                         "(a canvas or a custom-drawn app)")
+            if elems is not None:
+                img = _grab_checked(n, "parse_screen")
+                ann = _annotated(n)
+                _annotate(img, shown, {e["id"]: tuple(e["box"]) for e in shown if e.get("box")}, ann)
+                _LAST[n] = {e["id"]: tuple(e["center"]) for e in shown}
+                _LAST_EL[n] = {"typed": True, "source": meta["source"], "snapshot": meta["snapshot"],
+                               "elements": {e["id"]: _public(e) for e in elems},
+                               "handles": {e["id"]: e.get("path") for e in elems}}
+                base.update(meta, screen=[img.width, img.height], annotated=ann, count=len(shown),
+                            truncated=len(shown) > PARSE_MAX, offscreen=len(elems) - len(shown),
+                            elements=[_public(e) for e in shown[:PARSE_MAX]])
+                if keep_all:
+                    base["_all"] = [_public(e) for e in shown] + [_public(e) for e in elems if not e.get("onscreen")]
+                return base
+        if source == "a11y":
+            _fail("parse_screen", f"no accessibility information for instance {n}: {meta}",
+                  fix="use source='vision' (or 'auto'), or screenshot(instance) and click(x, y)", instance=n, vision=mode)
+        base["a11y_unavailable"] = meta
+    base["source"] = "vision"
     if mode == "none":
         base["note"] = ("no local grounding — take screenshot(instance) and reason about pixel coords "
                         "yourself, then click(x, y, instance)."
@@ -1115,12 +1225,14 @@ def _observe(instance, mode, settle_ms, payload: dict):
                 img = img.crop(box)
                 payload["observed_region"] = list(box)
             return [_dumps(payload), _encode(img)]
-        if mode == "parse":
+        if mode in ("parse", "elements"):
             pr = _do_parse(instance)
             for k in ("ok", "action", "instance"):
                 pr.pop(k, None)
-            payload["observed"] = "parse"
+            payload["observed"] = mode
             payload["parse"] = pr
+            if mode == "elements":                   # the element list alone: no image tokens
+                return _dumps(payload)
             out = [_dumps(payload)]
             ann = _annotated(instance)
             if pr.get("elements") is not None and os.path.exists(ann):
@@ -1141,27 +1253,45 @@ def _validate_observe(action, instance, observe, region=""):
     """Reject a bad observe mode/region BEFORE performing the action (never act, then error).
     Returns what _observe takes as `mode`: the mode, or (mode, crop box) with observe_region —
     which implies observe='screenshot'."""
-    if observe not in ("none", "screenshot", "parse"):
+    if observe not in ("none", "screenshot", "parse", "elements"):
         _fail(action, f"unknown observe mode '{observe}' — the action was not performed",
-              fix="use observe='none' | 'screenshot' | 'parse'", instance=instance)
+              fix="use observe='none' | 'screenshot' | 'parse' | 'elements'", instance=instance)
     if not region:
         return observe
-    if observe == "parse":
-        _fail(action, "observe_region crops a screenshot; it cannot be combined with observe='parse' — "
+    if observe in ("parse", "elements"):
+        _fail(action, f"observe_region crops a screenshot; it cannot be combined with observe='{observe}' — "
                       "the action was not performed",
               fix="drop observe_region, or use observe='screenshot'", instance=instance)
     W, H = _geometry(instance)
     return ("screenshot", _parse_region(action, instance, region, W, H, " — the action was not performed"))
 
 
-@mcp.tool()
-def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: str = "line") -> str:
-    """Detect on-screen elements and return them with ids + pixel-centers (vision grounding).
+@mcp.tool(annotations=_READ_ONLY)
+def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: str = "line",
+                 source: str = "auto") -> str:
+    """List the on-screen elements with ids + pixel-centers — then click_element(id), act(id) or
+    fill(element=id).
 
-    Returns {"ok", "vision", "screen": [W,H], "annotated", "count", "truncated",
-    "elements": [{id, type, label, interactive, center: [x,y]}, …]} — then click_element(id).
-    Also saves a numbered Set-of-Mark image (path in "annotated").
-    Backend = the effective GLOVEBOX_VISION: 'local' (OmniParser on the GPU, ~2 s after a ~10 s
+    Returns {"ok", "source", "vision", "screen": [W,H], "annotated", "count", "truncated",
+    "elements": [{id, type, label, interactive, center: [x,y]}, …]}. Also saves a numbered
+    Set-of-Mark image (path in "annotated").
+    `source` picks who is asked. 'auto' (default) asks the APP first — accessibility: exact
+    labels and real element types, no GPU, tens of milliseconds — and falls back to vision when
+    the app exposes fewer than 3 elements (a canvas, a game, a Tk app;
+    "a11y_unavailable" says why). "source" in the reply names what answered:
+      'browser-dom'  the active tab of a Chromium-family browser (roles, accessible names and
+                     states from the DOM, open shadow roots and same-origin iframes included;
+                     "frames_skipped": cross-origin iframes that could not be read — the
+                     browser's own toolbar is never listed). Elements also carry "role",
+                     "states" (disabled, checked, expanded, focused, required, readonly,
+                     password, …), "value" (never a password's) and a select's "options";
+                     "offscreen" counts the elements outside the viewport, which
+                     find_elements can still find and click_element/act scroll into view.
+      'at-spi'       a native toolkit app (GTK, Qt, LibreOffice) over the display's own
+                     accessibility bus; elements carry "role", "states", "value", "actions".
+      'vision'       pixels, as described below.
+    source='a11y' fails (isError) instead of falling back; source='vision' skips the app.
+    Vision backend = the effective GLOVEBOX_VISION: 'local' (OmniParser on the GPU, ~2 s after a ~10 s
     first-call model load; served by ONE shared vision-service process per machine so parallel
     agents don't each load the models — "via": "service"|"in-process", "queued_ms" says how long
     the GPU queue was, "detector" which detector answered, "fallback_reason" why the service was
@@ -1181,37 +1311,45 @@ def parse_screen(instance: int = 1, box_threshold: float = 0.05, granularity: st
     vision service busy, tesseract missing its language data). Elements are capped at 300 per
     call ("truncated": true when more were detected) — use find_elements to search instead of
     paging. Ids are only valid until the screen changes — re-parse after navigation."""
-    return _dumps(_do_parse(instance, box_threshold, granularity))
+    return _dumps(_do_parse(instance, box_threshold, granularity, source))
 
 
-@mcp.tool()
-def find_elements(query: str, instance: int = 1, type: str = "", limit: int = 20) -> str:
+@mcp.tool(annotations=_READ_ONLY)
+def find_elements(query: str, instance: int = 1, type: str = "", limit: int = 20, source: str = "auto") -> str:
     """Parse the screen and return only the elements whose label contains `query` (case-insensitive
     substring; empty query = all), optionally filtered by `type` (button, link, text, icon, …).
     One call instead of parse_screen + scanning 300 elements. The ids are valid for
     click_element(id) right away (this IS the most recent parse).
 
-    Returns {"ok", "instance", "vision", "query", "type", "count": total matches, "elements":
-    [{id, type, label, interactive, center}, …] (first `limit`, 1–100), "truncated"}. "count": 0
-    is an honest answer (the text is not on screen, or OCR did not read it — screenshot to check).
-    Fails (isError) like parse_screen; in vision mode 'none' it fails with the fix (no grounding
-    backend: screenshot and reason yourself)."""
+    Returns {"ok", "instance", "source", "vision", "query", "type", "count": total matches,
+    "elements": [{id, type, label, interactive, center}, …] (first `limit`, 1–100), "truncated"}.
+    `source`: see parse_screen ('auto' asks the app's accessibility information first, then
+    vision). With an accessibility source the search also covers what is scrolled out of view:
+    those hits come after the visible ones with "onscreen": false and "center": null (or
+    "covered": true under an overlay) — click_element(id), fill(element=id) and act(id) scroll
+    them into view themselves. "count": 0 is an honest answer (the text is not there, or OCR did
+    not read it — screenshot to check). Fails (isError) like parse_screen; with no accessibility
+    information and vision mode 'none' it fails with the fix (screenshot and reason yourself)."""
     n = _require("find_elements", instance)
     limit = max(1, min(int(limit), 100))
-    pr = _do_parse(n)
+    pr = _do_parse(n, source=source, keep_all=True)
     if pr.get("elements") is None:
         _fail("find_elements", "no grounding backend (vision mode 'none') — nothing can be searched",
               fix="screenshot(instance) and reason about the pixels yourself, or install a vision backend "
                   "(./install.sh basic|local); status() shows the vision diagnosis", instance=n, vision=pr["vision"])
     q = (query or "").lower()
     t = (type or "").lower()
-    hits = [e for e in pr["elements"] if (not q or q in (e.get("label") or "").lower())
+    hits = [e for e in pr.get("_all", pr["elements"]) if (not q or q in (e.get("label") or "").lower())
             and (not t or (e.get("type") or "").lower() == t)]
-    return _ok("find_elements", n, vision=pr["vision"], query=query, type=type, count=len(hits),
-               elements=hits[:limit], truncated=len(hits) > limit, screen=pr.get("screen"))
+    return _ok("find_elements", n, source=pr.get("source"), vision=pr["vision"], query=query, type=type,
+               count=len(hits), elements=hits[:limit], truncated=len(hits) > limit, screen=pr.get("screen"),
+               **({"a11y_unavailable": pr["a11y_unavailable"]} if pr.get("a11y_unavailable") else {}),
+               **({"note": "nothing in the app's accessibility information matches; text inside an image, a "
+                           "canvas or a cross-origin iframe is only visible to source='vision'"}
+                  if not hits and q and pr.get("source") in ("browser-dom", "at-spi") and source == "auto" else {}))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def wait_for_text(text: str, instance: int = 1, timeout_ms: int = 10000, interval_ms: int = 1000,
                   appear: bool = True) -> str:
     """Wait until `text` appears on screen (or, appear=false, disappears) — by OCR/parse polling.
@@ -1232,19 +1370,20 @@ def wait_for_text(text: str, instance: int = 1, timeout_ms: int = 10000, interva
     t0 = time.time()
     polls = 0
     while True:
-        pr = _do_parse(n)
+        pr = _do_parse(n, keep_all=True)
         if pr.get("elements") is None:
             _fail("wait_for_text", "no grounding backend (vision mode 'none') — cannot read the screen",
                   fix="use wait_for_stable() + screenshot() instead, or install a vision backend", instance=n)
         polls += 1
-        hit = next((e for e in pr["elements"] if q in (e.get("label") or "").lower()), None)
+        hit = next((e for e in pr.get("_all", pr["elements"]) if q in (e.get("label") or "").lower()
+                    or q in str(e.get("value") or "").lower()), None)
         found = hit is not None
         satisfied = found if appear else not found
         elapsed = int((time.time() - t0) * 1000)
         if satisfied or elapsed >= timeout_ms:
             return _ok("wait_for_text", n, text=text, appear=appear, found=found, satisfied=satisfied,
-                       elapsed_ms=elapsed, polls=polls, timed_out=not satisfied,
-                       element={k: hit[k] for k in ("id", "type", "label", "center")} if hit else None)
+                       elapsed_ms=elapsed, polls=polls, timed_out=not satisfied, source=pr.get("source"),
+                       element={k: hit.get(k) for k in ("id", "type", "label", "center")} if hit else None)
         time.sleep(interval)
 
 
@@ -1410,7 +1549,7 @@ def _click_at(n, action, x, y, button=1, count=1, modifiers=""):
                 pass
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def click(x: int, y: int, instance: int = 1, button: int = 1, count: int = 1, modifiers: str = "",
           observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Click at absolute pixel coords (top-left origin) in an instance.
@@ -1426,8 +1565,10 @@ def click(x: int, y: int, instance: int = 1, button: int = 1, count: int = 1, mo
     count: 1–3 clicks (2 = double-click, 3 = triple-click selects a line/paragraph).
     modifiers: keys held during the click — 'ctrl' (open in new tab / multi-select), 'shift'
     (range select), 'alt', 'super', combinable 'ctrl+shift'; released afterwards whatever happens.
-    `observe`='screenshot'|'parse' additionally returns the resulting screen state in the SAME
-    call (saves a round-trip); `settle_ms` (max 5000, "settle_clamped": true if you asked for
+    `observe`='screenshot'|'parse'|'elements' additionally returns the resulting screen state in
+    the SAME call (saves a round-trip): the image, the image plus the parsed elements, or the
+    element list alone (no image tokens — cheapest when the app exposes accessibility);
+    `settle_ms` (max 5000, "settle_clamped": true if you asked for
     more) waits for the UI to update first — use 400–1500 after anything that navigates or
     submits, or wait_for_stable() when you don't know how long. `observe_region`='x,y,w,h' crops
     that screenshot to the part you care about (implies observe='screenshot'; far fewer tokens
@@ -1447,7 +1588,7 @@ def click(x: int, y: int, instance: int = 1, button: int = 1, count: int = 1, mo
                          "count": count, "modifiers": modifiers})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def drag(x1: int, y1: int, x2: int, y2: int, instance: int = 1, button: int = 1, steps: int = 10,
          observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Drag (mouse-down → move → up) from (x1,y1) to (x2,y2) — for drawing, selecting, sliders.
@@ -1483,7 +1624,7 @@ def drag(x1: int, y1: int, x2: int, y2: int, instance: int = 1, button: int = 1,
                         {"action": "drag", **extra, "detail": f"dragged ({x1},{y1})->({x2},{y2})", "steps": steps})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def double_click(x: int, y: int, instance: int = 1, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Double-click at absolute pixel coords in an instance (e.g. open a file icon, select a word).
     Same as click(count=2).
@@ -1500,7 +1641,7 @@ def double_click(x: int, y: int, instance: int = 1, observe: str = "none", settl
                         {"action": "double_click", **extra, "detail": f"double-clicked ({x},{y})"})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def click_element(id: int, instance: int = 1, button: int = 1, modifiers: str = "", observe: str = "none",
                   settle_ms: int = 0, observe_region: str = ""):
     """Click an element by id from that instance's most recent parse_screen/find_elements (no
@@ -1508,23 +1649,172 @@ def click_element(id: int, instance: int = 1, button: int = 1, modifiers: str = 
 
     Returns {"ok", "action", "instance", "detail", "element", "center", "hit"?, "warnings"?}
     ("hit"/"warnings": see click()). Fails (isError) with the
-    fix named if the id is unknown — run parse_screen(instance) first. Ids go stale when the
-    screen changes: after navigation, re-parse before clicking. `modifiers`/`observe`/`settle_ms`:
-    see click()."""
+    fix named if the id is unknown — run parse_screen(instance) first. Ids from a vision parse
+    are remembered pixels: they go stale when the screen changes, so re-parse after navigation.
+    Ids from an accessibility source (parse "source": browser-dom | at-spi) are re-located just
+    before the click: an element that moved is clicked where it is NOW ("moved_from"), one that
+    is scrolled out of view is scrolled in first ("scrolled": true), and one that is gone fails
+    with "stale": true and nothing clicked. `modifiers`/`observe`/`settle_ms`: see click()."""
     n = _require("click_element", instance)
     observe = _validate_observe("click_element", n, observe, observe_region)
-    last = _LAST.get(n, {})
-    if id not in last:
-        _fail("click_element", f"unknown element id {id} for instance {n}",
-              fix="run parse_screen(instance) first — ids are only valid for the most recent parse",
-              instance=n, known_ids=len(last))
-    x, y = last[id]
     with _ilock(n):
+        x, y, found = _element_target(n, "click_element", id)
         extra = {**_foreign_input(n), **_hit_kw(n, x, y)}
+        if found.get("warnings"):
+            extra["warnings"] = found.pop("warnings") + extra.get("warnings", [])
+        extra.update(found)
         _click_at(n, "click_element", x, y, button, 1, modifiers)
         return _observe(n, observe, settle_ms,
                         {"action": "click_element", **extra, "detail": f"clicked element {id} at ({x},{y})",
                          "element": id, "center": [x, y]})
+
+
+@mcp.tool(annotations=_ACTS)
+def act(element: int, action: str = "press", value: str = "", instance: int = 1, allow_password: bool = False,
+        observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
+    """Operate an element through the app's own accessibility interface — no pointer, no
+    keyboard, no coordinates. `element` is an id from a parse_screen/find_elements whose
+    "source" was browser-dom or at-spi (not vision).
+
+    action='press'            activate it (button, link, checkbox, tab, menu item). Browser: a
+                              real, trusted click delivered to the page without moving the X
+                              pointer ("method": "cdp-input"); when the element is covered or
+                              out of view its click handler is invoked directly instead
+                              ("method": "dom-click", "synthetic": true — some pages ignore
+                              those). Native: the element's AT-SPI action ("at_spi_action").
+    action='set_value'        set `value`: text for a field (browser: trusted insert-text
+                              events, then a direct set if the page reformatted it), an
+                              option's text for a <select>, 'true'/'false' for a checkbox or
+                              radio, a number for a slider. Replaces the old content.
+    action='focus'            give it the keyboard focus (then type_text/press_keys).
+    action='scroll_into_view' bring an off-screen element into the viewport.
+    Returns {"ok", "action", "instance", "element", "label", "type", "did", "method",
+    "before": {states, value}, "after": {states, value}, "center"?, "verified"?: true|false|null
+    (set_value: the value read back equals `value`; null = unreadable, e.g. a password),
+    "scrolled"?, "synthetic"?, "note"?}. Compare before/after to see the effect (e.g. "checked"
+    appearing). Fails (isError), nothing done, when: the id is unknown or from a vision parse;
+    the element is gone ("stale": true — find_elements again); it is disabled or read-only; a
+    password field without allow_password=true; the app exposes no such action for it (then
+    click_element(id) / fill(element=id) use the pointer and keyboard instead); a <select> has
+    no such option ("options" lists them). Prefer fill() when the page must see real
+    keystrokes (autocomplete, per-key validation). `observe`/`settle_ms`/`observe_region`: see
+    click()."""
+    n = _require("act", instance)
+    observe = _validate_observe("act", n, observe, observe_region)
+    if action not in a11y.ACTIONS:
+        _fail("act", f"unknown action '{action}' — nothing was done",
+              fix="use action='press' | 'set_value' | 'focus' | 'scroll_into_view'", instance=n)
+    last = _LAST_EL.get(n) or {}
+    els = last.get("elements") or {}
+    el = els.get(element)
+    if el is None:
+        _fail("act", f"unknown element id {element} for instance {n} — nothing was done",
+              fix="run find_elements/parse_screen first — ids are only valid for the most recent parse",
+              instance=n, known_ids=len(els))
+    src = last.get("source")
+    label = (el.get("label") or "")[:60]
+    if not src:
+        _fail("act", f"element {element} comes from a vision parse — it is a position on screen, not a handle "
+                     "into the app; nothing was done",
+              fix="click_element(id) / fill(element=id) work on vision ids; for act() list the elements with "
+                  "find_elements(..., source='a11y')", instance=n)
+    if action == "set_value" and "password" in (el.get("states") or []) and not allow_password:
+        _fail("act", f"element {element} ('{label}') is a password field — nothing was set",
+              fix="pass allow_password=true if this is the field you mean", instance=n)
+    with _ilock(n):
+        try:
+            if src == "browser-dom":
+                with _cdp(_cdp_port(n), timeout=8) as (cmd, _target, _pages):
+                    r = a11y.browser_act(cmd, last["snapshot"], element, action, value)
+            else:
+                py, env = _a11y_env(n)
+                if not py:
+                    raise RuntimeError(env)
+                r = a11y.atspi_call(py, env, "act", json.dumps(last["handles"].get(element)), el.get("role", ""),
+                                    el.get("label", ""), action, value)
+                r.pop("ok", None)
+        except a11y.Stale as e:
+            _fail("act", f"element {element} ('{label}') is stale: {e} — nothing was done",
+                  fix="find_elements/parse_screen again and use the new id", instance=n, stale=True)
+        except Exception as e:
+            kw = {"options": e.options} if getattr(e, "options", None) else {}
+            _fail("act", f"could not {action} element {element} ('{label}'): {e} — nothing was done",
+                  fix="click_element(id) / fill(element=id) use the pointer and keyboard instead"
+                      if getattr(e, "no_action", False) else
+                      "check the element's \"states\" (disabled, readonly) and \"options\"; find_elements again "
+                      "if the screen changed", instance=n, **kw)
+        res = {"action": "act", "element": element, "label": label, "type": el.get("type"), "did": action, **r}
+        if action == "set_value":
+            after = (r.get("after") or {})
+            if "password" in (el.get("states") or []) or after.get("value") is None:
+                res["verified"] = None if el.get("type") not in ("checkbox", "radio", "switch") else \
+                    (("checked" in (after.get("states") or [])) == (value.strip().lower() in ("true", "1", "on", "yes", "checked")))
+            else:
+                got, want = str(after["value"]), value
+                try:                                 # sliders and spin buttons: 5 == 5.0
+                    res["verified"] = got == want or float(got.replace(",", ".")) == float(want.replace(",", "."))
+                except ValueError:
+                    res["verified"] = got == want or got.strip().lower() == want.strip().lower()
+        res["detail"] = f"{action} on element {element} ('{label}') via {r.get('method', src)}"
+        return _observe(n, observe, settle_ms, res)
+
+
+def _element_target(n, action, id):
+    """(x, y, info) — where to point at element `id` of instance n's latest parse, right now.
+    Vision ids are remembered pixels. Accessibility ids are looked up again in the app: the
+    element may have moved (info.moved_from), be scrolled out of view (scrolled in first,
+    info.scrolled) or be gone (fails with stale: true — nothing was done)."""
+    last = _LAST_EL.get(n) or {}
+    els = last.get("elements") or {}
+    el = els.get(id)
+    src = last.get("source")
+    if el is None:
+        _fail(action, f"unknown element id {id} for instance {n} — nothing was done",
+              fix="run parse_screen/find_elements first — ids are only valid for the most recent parse",
+              instance=n, known_ids=len(els))
+    if not src:
+        return (*el["center"], {})
+    label = (el.get("label") or "")[:40]
+
+    def stale(why):
+        _fail(action, f"element {id} ('{label}') is stale: {why} — nothing was done",
+              fix="find_elements/parse_screen again and use the new id", instance=n, stale=True)
+
+    info, p = {}, None
+    try:
+        if src == "browser-dom":
+            with _cdp(_cdp_port(n), timeout=5) as (cmd, _target, _pages):
+                p = a11y.browser_locate(cmd, last["snapshot"], id)
+            if p.get("covered"):
+                info["warnings"] = [f"element {id} ('{label}') is covered by <{p.get('by', '?')}> at its centre — the "
+                                    "click goes to whatever is on top (see \"hit\"); act(id) invokes the element itself"]
+        else:
+            py, env = _a11y_env(n)
+            if not py:
+                raise RuntimeError(env)
+            p = a11y.atspi_call(py, env, "locate", json.dumps(last["handles"].get(id)), el.get("role", ""),
+                                el.get("label", ""))
+    except a11y.Stale as e:
+        stale(str(e))
+    except ToolError:
+        raise
+    except Exception as e:                           # the lookup itself failed: fall back to where it was
+        if not el.get("center"):
+            _fail(action, f"element {id} ('{label}') could not be located ({e}) — nothing was done",
+                  fix="find_elements/parse_screen again", instance=n)
+        return (*el["center"], {"warnings": [f"element {id} could not be re-located ({str(e)[:80]}); "
+                                              "used the position from the parse"]})
+    if not p.get("center"):
+        _fail(action, f"element {id} ('{label}') is not visible (hidden, zero-sized or in a closed menu) — "
+                      "nothing was done",
+              fix="open the menu/section that contains it, or act(id) to invoke it without the pointer", instance=n)
+    x, y = (int(v) for v in p["center"])
+    if p.get("scrolled"):
+        info["scrolled"] = True
+        time.sleep(0.15)                             # let the scroll paint before the pointer moves
+    elif el.get("center") and (abs(x - el["center"][0]) > 3 or abs(y - el["center"][1]) > 3):
+        info["moved_from"] = list(el["center"])
+    return x, y, info
 
 
 def _xclip(n, action, *args, input=None):
@@ -1586,7 +1876,7 @@ def _type_into(n, action, text, clear=False) -> str:
     return method
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def type_text(text: str, instance: int = 1, clear: bool = False, submit: bool = False,
               observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Type into the focused field — unicode-safe. Click the field first to focus it.
@@ -1742,10 +2032,12 @@ def _label_warning(n, element):
     el = els.get(element)
     if not last.get("typed") or not el or el.get("type") not in vision.SP_NON_INTERACTIVE:
         return {}
+    if not el.get("center"):
+        return {}
     ex, ey = el["center"]
     best = None
     for c in els.values():
-        if c.get("type") != "input":
+        if c.get("type") != "input" or not c.get("center"):
             continue
         dx, dy = c["center"][0] - ex, c["center"][1] - ey
         if (dx > 0 and abs(dy) <= 25) or (dy > 0 and abs(dx) <= 250):
@@ -1814,7 +2106,7 @@ def _read_field(n, action):
     return got, "clipboard", None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = -1, submit: bool = False,
          verify: bool = True, allow_password: bool = False, observe: str = "none", settle_ms: int = 0,
          observe_region: str = ""):
@@ -1845,8 +2137,9 @@ def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = 
       verified false — it holds something else ("value", first 200 chars): the field reformats
         or limits input (dates, phone masks, maxlength);
       verified null  — the value could not be read (native password field, canvas).
-    With `element`, a typed detector (ScreenParser) warns when the element is a text label and
-    names the nearest input ("suggest_element"). Also fails (isError) when the field is still
+    With `element`, an accessibility source or a typed detector (ScreenParser) warns when the
+    element is a text label and names the nearest input ("suggest_element"); accessibility ids
+    are re-located first (see click_element). Also fails (isError) when the field is still
     empty after typing; repeating fill() is always safe (it replaces). Native read-back goes
     through select-all + copy (the clipboard is restored). `observe`/`settle_ms`/
     `observe_region`: see click()."""
@@ -1854,13 +2147,11 @@ def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = 
     observe = _validate_observe("fill", n, observe, observe_region)
     extra = {}
     if int(element) >= 0:
-        last = _LAST.get(n, {})
-        if element not in last:
-            _fail("fill", f"unknown element id {element} for instance {n} — nothing was done",
-                  fix="run parse_screen/find_elements first — ids are only valid for the most recent parse",
-                  instance=n, known_ids=len(last))
-        x, y = last[element]
+        x, y, found = _element_target(n, "fill", element)
         extra = _label_warning(n, element)
+        if found.get("warnings"):
+            extra["warnings"] = extra.get("warnings", []) + found.pop("warnings")
+        extra.update(found)
     elif x < 0 or y < 0:
         _fail("fill", "no target — nothing was done", fix="pass x and y (pixels) or element=<id from find_elements>",
               instance=n)
@@ -1927,7 +2218,7 @@ def fill(text: str, x: int = -1, y: int = -1, instance: int = 1, element: int = 
                          "detail": f"filled {len(text)} chars at ({x},{y})" + (" + Return" if submit else "")})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def clipboard(action: str = "get", text: str = "", instance: int = 1) -> str:
     """Read or set the instance's clipboard — the cheapest way to get EXACT text out of an app.
 
@@ -1963,7 +2254,7 @@ def clipboard(action: str = "get", text: str = "", instance: int = 1) -> str:
                truncated=len(out) > CLIP_MAX)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def upload_file(filepath: str, instance: int = 1, selector: str = "input[type=file]",
                 page_url_contains: str = "", observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Attach a local file to a page's <input type=file> via Chrome DevTools Protocol — use this for
@@ -2006,7 +2297,7 @@ _VIEWPORT_JS = r"""(function() {
 })()"""
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def browser(action: str = "info", instance: int = 1, url: str = "", js: str = "",
             page_url_contains: str = "", max_chars: int = 0, timeout_s: float = 30) -> str:
     """Talk to the instance's Chromium-family browser over the Chrome DevTools Protocol — exact
@@ -2119,7 +2410,7 @@ def browser(action: str = "info", instance: int = 1, url: str = "", js: str = ""
                   f"(CDP port {_cdp_port(n)}); window_info() shows whether a browser window exists", instance=n)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ADDITIVE)
 def open_file(filepath: str, instance: int = 1, app: str = "") -> str:
     """Open a local file in an app ON an existing instance's display (NOT a new instance).
 
@@ -2150,7 +2441,7 @@ def open_file(filepath: str, instance: int = 1, app: str = "") -> str:
     return _ok("open_file", n, opened=p, app=app or "xdg-open", pid=proc.pid)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def list_files(instance: int = 1) -> str:
     """The instance's staging folder (files/<N>/ under the install dir) and its contents.
 
@@ -2186,7 +2477,7 @@ def list_files(instance: int = 1) -> str:
     return _ok("list_files", n, dir=d, count=total, truncated=truncated, files=rows)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ADDITIVE)
 def put_file(name: str, content: str, instance: int = 1, encoding: str = "text", overwrite: bool = False) -> str:
     """Write a file into the instance's staging folder files/<N>/ — the way to hand the sandbox a
     file you produced (a CSV to import, an SVG to open, a text to upload) without shell access.
@@ -2283,7 +2574,7 @@ def _validate_keys(action, n, toks):
                           "'KP_Enter', 'space', 'minus', 'at'; sequences are space-separated", instance=n)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def press_keys(keys: str, instance: int = 1, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Press a key, a combo, or a SEQUENCE (xdotool keysym syntax, space-separated for sequences):
     'Return', 'ctrl+a', 'Tab', 'ctrl+t', 'F5', 'ctrl+a Delete', 'alt+F4', 'shift+Insert'.
@@ -2313,7 +2604,7 @@ def press_keys(keys: str, instance: int = 1, observe: str = "none", settle_ms: i
                         {"action": "press_keys", **extra, "detail": f"pressed {keys}", "keys": toks})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ADDITIVE)
 def move_mouse(x: int, y: int, instance: int = 1) -> str:
     """Move the mouse pointer to absolute pixel coords in an instance (no click).
 
@@ -2327,7 +2618,7 @@ def move_mouse(x: int, y: int, instance: int = 1) -> str:
     return _ok("move_mouse", n, detail=f"moved to ({x},{y})")
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def scroll(amount: int = 3, instance: int = 1, x: int = -1, y: int = -1, axis: str = "vertical",
            direction: str = "", observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Scroll the wheel. Say where: direction='down'|'up'|'left'|'right' with `amount` notches
@@ -2372,7 +2663,7 @@ def scroll(amount: int = 3, instance: int = 1, x: int = -1, y: int = -1, axis: s
                          "direction": {4: "up", 5: "down", 6: "left", 7: "right"}[btn]})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def wait_ms(ms: int) -> str:
     """Wait (e.g. for a page to load or an app to draw) — capped at 10000 ms.
 
@@ -2386,7 +2677,7 @@ def wait_ms(ms: int) -> str:
     return _ok("wait_ms", requested_ms=ms, waited_ms=waited, clamped=waited != ms)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def wait_for_stable(instance: int = 1, timeout_ms: int = 5000, interval_ms: int = 300,
                     threshold: float = 0.002, observe: str = "none", observe_region: str = ""):
     """Wait until the screen stops changing (page loaded, app drew, animation ended) — replaces
@@ -2440,7 +2731,7 @@ def _active_window(n, action):
     return active, None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def window_info(instance: int = 1) -> str:
     """The active window's title + geometry, the visible windows and the pointer position on an
     instance — a cheap, image-free way to confirm navigation (browser titles follow the page) or
@@ -2470,7 +2761,7 @@ def window_info(instance: int = 1) -> str:
                truncated=len(ids) > WINDOWS_MAX, cursor=cursor)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ACTS)
 def manage_window(action: str, instance: int = 1, window_id: int = 0, width: int = 0, height: int = 0,
                   x: int = 0, y: int = 0, observe: str = "none", settle_ms: int = 0, observe_region: str = ""):
     """Act on a window of an instance: action='activate' (focus/raise — switch between an app's
@@ -2521,7 +2812,7 @@ def manage_window(action: str, instance: int = 1, window_id: int = 0, width: int
                         {"action": "manage_window", "window": wid, "detail": f"{action} window {wid}"})
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def app_log(instance: int = 1, lines: int = 50) -> str:
     """Tail of the stderr log of the apps launched on an instance (launch_app / start_app /
     open_file) — read it when an app crashed, drew nothing, or misbehaves.
@@ -2544,7 +2835,7 @@ def app_log(instance: int = 1, lines: int = 50) -> str:
                truncated=len(all_lines) > len(tail))
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ_ONLY)
 def status() -> str:
     """Server + sandbox status in one read-only call — run this first, and when filing bug reports.
 
@@ -2592,16 +2883,21 @@ def status() -> str:
         ("xprop", "xprop"))}
     deps["atspi"] = bool(_a11y_python())
     if not deps["atspi"]:
-        notes.append("AT-SPI bindings are missing: fill() cannot check the focus in native apps and types "
-                     f"blind there (focus_checked: false) — {A11Y_APT}")
+        notes.append("AT-SPI bindings are missing: native apps cannot be read through accessibility "
+                     "(find_elements falls back to vision, act() is unavailable) and fill() types blind there "
+                     f"(focus_checked: false) — {A11Y_APT}")
     keyboard = {"host_layout": host_bridge.display_layout(HOST, _host_env()),
                 "override": os.environ.get("GLOVEBOX_KEYBOARD", "")}
     v = vision.resolve(omni=omni, tess=tess, service_loaded=bool(svc and svc.get("loaded")))
     _VISION.update(value=v, at=time.time())
-    tips.insert(0, "labelled UI: find_elements('Save') -> click_element(id) instead of guessing pixels; "
-                   "wait_for_text('Done') instead of sleeping" if v["effective"] != "none" else
-                   "no grounding backend: screenshot(region=…) and click(x, y); ./install.sh basic adds "
-                   "find_elements/click_element/wait_for_text by label")
+    tips.insert(0, "labelled UI: find_elements('Save') -> click_element(id) / act(id) / fill(element=id) instead of "
+                   "guessing pixels — the app's accessibility information is asked first (exact labels, no GPU), "
+                   "vision second; wait_for_text('Done') instead of sleeping"
+                   + ("" if v["effective"] != "none" else
+                      ". No vision backend is installed: apps without accessibility (canvases, games, Tk) need "
+                      "screenshot(region=…) and click(x, y); ./install.sh basic adds OCR for them"))
+    tips.append("after an action pass observe='elements' for the element list alone (no image), and act(id) to "
+                "press or set a control without moving the pointer")
     return _ok("status", version=__version__, host_display=HOST, tmp_dir=TMP,
                cleanup_on_exit=_truthy(os.environ.get("GLOVEBOX_CLEANUP_ON_EXIT", "")),
                vision={**v, "gpu": gpu, "omniparser": omni, "tesseract": tess},

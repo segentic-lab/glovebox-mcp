@@ -19,7 +19,11 @@ EXPECTED_TOOLS = {
     "wait_ms", "status", "find_elements", "wait_for_text", "start_app", "browser", "manage_window", "put_file", "fill",
     # 0.3.0
     "clipboard", "wait_for_stable", "window_info", "app_log",
+    # 0.7.0
+    "act",
 }
+
+
 
 
 def _vision(monkeypatch, **kw):
@@ -35,7 +39,7 @@ def _vision(monkeypatch, **kw):
 def test_all_tools_registered():
     names = {t.name for t in server.mcp._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
-    assert len(names) == 30
+    assert len(names) == 31
 
 
 def test_descriptions_are_agent_first():
@@ -623,3 +627,228 @@ def test_browser_eval_result_is_capped_and_flagged(monkeypatch):
     assert len(d["result_json"]) == server.EVAL_MAX and d["length"] > server.EVAL_MAX and "max_chars" in d["fix"]
     d = json.loads(server.browser(action="eval", instance=3, js="big", max_chars=1_000_000))
     assert len(d["result"]) == 10_000 and "truncated" not in d
+
+
+# ---------- accessibility grounding ----------
+def _a11y_elements():
+    return [
+        {"id": 0, "type": "text", "role": "heading", "label": "Prijava", "interactive": False, "onscreen": True,
+         "center": [100, 40], "box": [10, 30, 190, 50]},
+        {"id": 1, "type": "input", "role": "textbox", "label": "E-pošta", "interactive": True, "onscreen": True,
+         "center": [100, 90], "box": [10, 80, 190, 100], "value": ""},
+        {"id": 2, "type": "input", "role": "textbox", "label": "Geslo", "interactive": True, "onscreen": True,
+         "center": [100, 130], "box": [10, 120, 190, 140], "states": ["password"]},
+        {"id": 3, "type": "button", "role": "button", "label": "Prijava", "interactive": True, "onscreen": True,
+         "center": [100, 170], "box": [10, 160, 190, 180]},
+        {"id": 7, "type": "link", "role": "link", "label": "Pogoji uporabe", "interactive": True, "onscreen": False,
+         "center": None},
+    ]
+
+
+def _fake_a11y(monkeypatch, elems=None, source="browser-dom"):
+    monkeypatch.setattr(server, "_a11y_parse",
+                        lambda n: (elems if elems is not None else _a11y_elements(), {"source": source, "snapshot": 4}))
+    monkeypatch.setattr(server, "_grab_checked", lambda n, action: Image.new("RGB", (300, 200), "white"))
+    monkeypatch.setattr(server, "_require", lambda action, instance, up=True: int(instance))
+
+
+def test_parse_asks_the_app_before_the_pixels(monkeypatch, tmp_path):
+    _vision(monkeypatch, effective="local")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch)
+    monkeypatch.setattr(server, "_parse_local", lambda *a, **kw: pytest.fail("vision must not run when the app answers"))
+    d = json.loads(server.parse_screen(instance=7))
+    assert d["source"] == "browser-dom" and d["count"] == 4 and d["offscreen"] == 1 and d["snapshot"] == 4
+    assert [e["id"] for e in d["elements"]] == [0, 1, 2, 3]
+    assert all("box" not in e and "path" not in e and "onscreen" not in e for e in d["elements"])
+    assert os.path.exists(d["annotated"])
+    # find_elements also searches what is scrolled out of view, and says so
+    f = json.loads(server.find_elements("pogoji", instance=7))
+    assert f["source"] == "browser-dom" and f["count"] == 1
+    assert f["elements"][0] == {"id": 7, "type": "link", "role": "link", "label": "Pogoji uporabe",
+                                "interactive": True, "onscreen": False, "center": None}
+    f = json.loads(server.find_elements("prijava", instance=7, type="button"))
+    assert [e["id"] for e in f["elements"]] == [3]
+    f = json.loads(server.find_elements("ni tega", instance=7))
+    assert f["count"] == 0 and "source='vision'" in f["note"]
+
+
+def test_parse_falls_back_to_vision_and_says_why(monkeypatch, tmp_path):
+    _vision(monkeypatch, effective="basic")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch, elems=_a11y_elements()[:2])            # a canvas app: next to nothing exposed
+    monkeypatch.setattr(vision, "parse_tesseract",
+                        lambda img, g: ([{"id": 0, "type": "text", "label": "ocr", "interactive": False, "center": [5, 5]}], {}))
+    d = json.loads(server.parse_screen(instance=7))
+    assert d["source"] == "vision" and "only 2 element(s)" in d["a11y_unavailable"] and d["elements"][0]["label"] == "ocr"
+    # asked for explicitly, the app's two elements are returned; and source='vision' never asks the app
+    assert json.loads(server.parse_screen(instance=7, source="a11y"))["source"] == "browser-dom"
+    monkeypatch.setattr(server, "_a11y_parse", lambda n: pytest.fail("source='vision' must not ask the app"))
+    assert json.loads(server.parse_screen(instance=7, source="vision"))["source"] == "vision"
+    monkeypatch.setattr(server, "_a11y_parse", lambda n: (None, "no accessibility bus on this display"))
+    with pytest.raises(ToolError) as e:
+        server.parse_screen(instance=7, source="a11y")
+    assert "no accessibility bus" in json.loads(str(e.value))["error"]
+    with pytest.raises(ToolError, match="unknown source"):
+        server.parse_screen(instance=7, source="magic")
+
+
+def test_without_vision_the_app_alone_grounds(monkeypatch, tmp_path):
+    """Vision mode 'none' used to mean no find_elements at all."""
+    _vision(monkeypatch, effective="none")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch, elems=_a11y_elements()[3:4], source="at-spi")
+    f = json.loads(server.find_elements("prijava", instance=7))
+    assert f["source"] == "at-spi" and f["count"] == 1
+
+
+def _fake_locate(monkeypatch, answer):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_cdp(port, page_url_contains="", timeout=15):
+        yield (lambda method, params=None, wait=None: {}), {}, []
+    monkeypatch.setattr(server, "_cdp", fake_cdp)
+
+    def locate(cmd, snap, i, scroll=True):
+        v = answer["v"]
+        if isinstance(v, Exception):
+            raise v
+        return v
+    monkeypatch.setattr(server.a11y, "browser_locate", locate)
+
+
+def test_accessibility_ids_are_located_again_before_use(monkeypatch, tmp_path):
+    _vision(monkeypatch, effective="none")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch)
+    server.parse_screen(instance=7)
+    answer = {}
+    _fake_locate(monkeypatch, answer)
+    answer["v"] = {"center": [100, 170], "inview": True, "covered": False}
+    assert server._element_target(7, "click_element", 3) == (100, 170, {})
+    answer["v"] = {"center": [100, 400], "inview": True, "covered": False}          # the page re-flowed
+    assert server._element_target(7, "click_element", 3) == (100, 400, {"moved_from": [100, 170]})
+    answer["v"] = {"center": [150, 300], "inview": True, "covered": False, "scrolled": True}
+    assert server._element_target(7, "click_element", 7) == (150, 300, {"scrolled": True})
+    answer["v"] = {"center": [100, 170], "inview": True, "covered": True, "by": "div#modal"}
+    assert "covered by <div#modal>" in server._element_target(7, "click_element", 3)[2]["warnings"][0]
+    answer["v"] = server.a11y.Stale("the element is no longer in the page")
+    with pytest.raises(ToolError) as e:
+        server._element_target(7, "click_element", 3)
+    d = json.loads(str(e.value))
+    assert d["stale"] is True and "nothing was done" in d["error"] and "find_elements" in d["fix"]
+    answer["v"] = {"inview": False, "visible": False}
+    with pytest.raises(ToolError, match="not visible"):
+        server._element_target(7, "click_element", 3)
+    with pytest.raises(ToolError, match="unknown element id 99"):
+        server._element_target(7, "click_element", 99)
+    answer["v"] = OSError("browser went away")             # the lookup failed: the parsed position, flagged
+    x, y, info = server._element_target(7, "click_element", 3)
+    assert (x, y) == (100, 170) and "could not be re-located" in info["warnings"][0]
+
+
+def test_vision_ids_stay_remembered_pixels(monkeypatch):
+    monkeypatch.setitem(server._LAST_EL, 7, {"typed": False, "elements": {5: {"id": 5, "center": [9, 8]}}})
+    monkeypatch.setattr(server, "_cdp", lambda *a, **kw: pytest.fail("a vision id has nothing to look up"))
+    assert server._element_target(7, "click_element", 5) == (9, 8, {})
+
+
+def test_act_refuses_before_touching_anything(monkeypatch, tmp_path):
+    _vision(monkeypatch, effective="none")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch)
+    server.parse_screen(instance=7)
+    monkeypatch.setattr(server.a11y, "browser_act", lambda *a, **kw: pytest.fail("must not act"))
+    for kw, needle in (({"element": 3, "action": "smash"}, "unknown action"),
+                       ({"element": 99}, "unknown element id 99"),
+                       ({"element": 2, "action": "set_value", "value": "x"}, "password field"),
+                       ({"element": 3, "observe": "video"}, "unknown observe mode")):
+        with pytest.raises(ToolError) as e:
+            server.act(instance=7, **kw)
+        assert needle in json.loads(str(e.value))["error"]
+    monkeypatch.setitem(server._LAST_EL, 7, {"typed": False, "elements": {5: {"id": 5, "center": [9, 8]}}})
+    with pytest.raises(ToolError) as e:
+        server.act(element=5, instance=7)
+    assert "vision parse" in json.loads(str(e.value))["error"] and "source='a11y'" in json.loads(str(e.value))["fix"]
+
+
+def test_act_reports_before_after_and_verifies_a_set_value(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    _vision(monkeypatch, effective="none")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch)
+    server.parse_screen(instance=7)
+
+    @contextmanager
+    def fake_cdp(port, page_url_contains="", timeout=15):
+        yield (lambda method, params=None, wait=None: {}), {}, []
+    monkeypatch.setattr(server, "_cdp", fake_cdp)
+    result = {}
+    monkeypatch.setattr(server.a11y, "browser_act", lambda cmd, snap, i, action, value="": result["v"]
+                        if not isinstance(result["v"], Exception) else (_ for _ in ()).throw(result["v"]))
+    result["v"] = {"method": "cdp-insert-text", "before": {"states": [], "value": ""},
+                   "after": {"states": ["focused"], "value": "a@b.si"}, "center": [100, 90]}
+    d = json.loads(server.act(element=1, action="set_value", value="a@b.si", instance=7))
+    assert d["verified"] is True and d["did"] == "set_value" and d["label"] == "E-pošta" and d["method"] == "cdp-insert-text"
+    result["v"] = {"method": "dom-set", "before": {"states": [], "value": ""}, "after": {"states": [], "value": "A@B.SI!"}}
+    assert json.loads(server.act(element=1, action="set_value", value="a@b.si", instance=7))["verified"] is False
+    result["v"] = {"method": "cdp-insert-text", "before": {"states": ["password"]}, "after": {"states": ["password"], "value": None}}
+    d = json.loads(server.act(element=2, action="set_value", value="s3cret", instance=7, allow_password=True))
+    assert d["verified"] is None and "s3cret" not in json.dumps(d)
+    result["v"] = server.a11y.Stale("the element is no longer in the page")
+    with pytest.raises(ToolError) as e:
+        server.act(element=3, instance=7)
+    assert json.loads(str(e.value))["stale"] is True
+    err = RuntimeError("no option 'Nemčija'")
+    err.options = ["Slovenija", "Hrvaška"]
+    result["v"] = err
+    with pytest.raises(ToolError) as e:
+        server.act(element=1, action="set_value", value="Nemčija", instance=7)
+    assert json.loads(str(e.value))["options"] == ["Slovenija", "Hrvaška"]
+
+
+def test_observe_elements_returns_the_list_without_an_image(monkeypatch, tmp_path):
+    _vision(monkeypatch, effective="none")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    _fake_a11y(monkeypatch)
+    assert server._validate_observe("click", 7, "elements") == "elements"
+    out = server._observe(7, "elements", 0, {"action": "click", "detail": "x"})
+    assert isinstance(out, str)                                   # no image content block
+    d = json.loads(out)
+    assert d["observed"] == "elements" and d["parse"]["count"] == 4 and "_all" not in d["parse"]
+    with pytest.raises(ToolError, match="cannot be combined"):
+        server._validate_observe("click", 7, "elements", "0,0,10,10")
+
+
+def test_tree_helper_reports_missing_bindings_as_json():
+    """The venv python has no PyGObject: the helper must say so in JSON, not crash."""
+    import sys
+    r = subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(server.__file__), "a11y_tree.py"), "dump"],
+                       capture_output=True, text=True, timeout=20)
+    d = json.loads(r.stdout)
+    assert d["ok"] is True or "not importable" in d["error"] or d.get("error")
+
+
+def test_every_tool_declares_what_it_may_change():
+    tools = {t.name: t.annotations for t in server.mcp._tool_manager.list_tools()}
+    assert all(a is not None for a in tools.values())
+    read_only = {n for n, a in tools.items() if a.read_only_hint}
+    assert read_only == {"list_instances", "get_screen_size", "screenshot", "parse_screen", "find_elements",
+                         "wait_for_text", "list_files", "wait_ms", "wait_for_stable", "window_info", "app_log", "status"}
+    assert tools["close_instance"].destructive_hint is True and tools["act"].destructive_hint is True
+    assert tools["put_file"].destructive_hint is False and tools["launch_app"].destructive_hint is False
+
+
+def test_browser_act_never_types_into_a_readonly_or_disabled_field():
+    calls = []
+
+    def cmd(method, params=None, wait=None):
+        calls.append(method)
+        if method == "Runtime.evaluate":
+            return {"result": {"value": {"visible": True, "inview": True, "covered": False, "css": [5, 5],
+                                         "states": ["readonly"], "value": "x", "tag": "input", "editable": True}}}
+        return {}
+    with pytest.raises(RuntimeError, match="read-only"):
+        server.a11y.browser_act(cmd, 1, 0, "set_value", "y")
+    assert "Input.insertText" not in calls and "Input.dispatchMouseEvent" not in calls

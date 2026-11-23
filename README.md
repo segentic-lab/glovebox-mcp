@@ -102,17 +102,18 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 > **Driving it with an AI agent?** Paste [`AGENTS.md`](AGENTS.md) into the agent's system prompt — it
 > teaches the observe → act → verify loop, grounding, the upload/unicode gotchas, and when to stop.
 
-## Tools (30)
+## Tools (31)
 
 | Tool | What |
 |---|---|
 | `status()` | Server + sandbox status in one read-only call: version, the vision diagnosis (requested vs. effective backend and *why*, GPU name/VRAM, OmniParser code/weights, tesseract languages), live instances, and which system deps are present. Run it first — and paste it into bug reports. |
 | `screenshot(instance, region?, scale?, format?)` | `[json, image]`. `region="x,y,w,h"` zooms into a rectangle, `scale=0.5` shrinks, `format="jpeg"` compresses — cut payload or read small text. |
-| `parse_screen(instance, granularity?)` | Vision grounding → JSON of detected elements (id, type, label, interactive, pixel-center; capped at 300 per call, flagged via `"truncated"`) + a numbered Set-of-Mark image. `basic` merges OCR words into **lines** (`"Sign in"` = one target; `granularity="word"` for single words). |
-| `find_elements(query, type?)` | Parse + filter in one call: the elements whose label contains `query` (and optionally of one `type`), ids ready for `click_element`. `count: 0` is an honest "not on screen". |
-| `wait_for_text(text, timeout_ms?, appear?)` | Poll OCR/parse until a text appears (or disappears) — the honest replacement for "sleep and hope" after navigation; `timed_out` is reported, never hidden. |
+| `parse_screen(instance, source?, granularity?)` | The on-screen elements as JSON (id, type, label, interactive, pixel-center; capped at 300 per call, flagged via `"truncated"`) + a numbered Set-of-Mark image. **`source="auto"` asks the app first** — its accessibility information: exact labels, real element types, `states` (disabled, checked, expanded…), `value`, no GPU, tens of milliseconds — and falls back to vision for apps that expose nothing (canvas, games, Tk); `"source"` in the reply says who answered (`browser-dom`, `at-spi`, `vision`). In vision mode `basic` OCR words are merged into **lines** (`"Sign in"` = one target; `granularity="word"` for single words). |
+| `find_elements(query, type?, source?)` | Parse + filter in one call: the elements whose label contains `query` (and optionally of one `type`), ids ready for `click_element` / `act` / `fill(element=)`. With an accessibility source it also finds what is **scrolled out of view** (`"onscreen": false`) — the click scrolls it in. `count: 0` is an honest "not there". |
+| `act(element, action?, value?)` | Operate an element **through the app's accessibility interface — no pointer, no keyboard, no coordinates**: `press` (button, link, checkbox, menu item), `set_value` (text, a `<select>` option, `true`/`false`, a slider number), `focus`, `scroll_into_view`. Returns the element's states and value `before` and `after` (and `verified` for `set_value`). In browsers `press` is a real, trusted click delivered over DevTools; in native apps it is the widget's AT-SPI action. Refuses stale ids, disabled or read-only elements and unannounced password fields with nothing done. |
+| `wait_for_text(text, timeout_ms?, appear?)` | Poll the app's accessibility text (or OCR/parse) until a text appears (or disappears) — the honest replacement for "sleep and hope" after navigation; `timed_out` is reported, never hidden. |
 | `fill(text, x, y \| element=id, submit?, verify?, allow_password?)` | Set a form field in **one verified call**: click it, **check the focus before typing**, replace its content, **read the value back**. The focus check runs through the page's DOM in browsers and through the accessibility bus (AT-SPI) in native GTK/Qt/LibreOffice apps: a click that landed on a label (the focus stayed elsewhere), a non-editable widget, or a **password field you did not announce** (`allow_password=true`) fails with **nothing typed** and `focus` naming what has it. `verified: true` = the field holds exactly the text; `false` + `value` = it reformatted or cut it; `null` = unreadable. Where nobody can tell the focus (canvas, games, Xlib-only apps) the reply says `focus_checked: false`, a warning, and `click_effect` (did any pixel near the click change) — never a clean success. |
-| `click_element(id, modifiers?)` | Click an element from the last `parse_screen`/`find_elements` (no coordinate guessing). |
+| `click_element(id, modifiers?)` | Click an element from the last `parse_screen`/`find_elements` (no coordinate guessing). Accessibility ids are **located again at click time**: an element that moved is clicked where it is now, one out of view is scrolled in, one that is gone fails with `stale: true` instead of clicking whatever took its place. |
 | `click(x,y, count?, modifiers?)` · `double_click` · `move_mouse` · `scroll(amount, direction?, x?, y?, axis?)` · `drag(…, steps?)` | Pointer ops. In Chromium-family browsers a click returns **`hit`** — the element under the point, read from the DOM just before the click (`{"role": "checkbox", "name": "Remember me", "checked_before": false}`), so a misclick is visible at once. `scroll(3, direction="down")` or the signed form (negative = down). Coordinates outside the display are **rejected** (xdotool would silently clamp them). `count=2/3` double/triple-clicks, `modifiers="ctrl+shift"` holds keys (released whatever happens). `scroll` can move to `x,y` first, scroll `horizontal`, and reports `applied`/`clamped` (max 100 notches). `drag` emits intermediate motion events so canvases and sliders register it, and releases the button even if a step fails. |
 | `type_text(text, clear?, submit?)` | **Unicode-safe** typing (ASCII via xdotool; anything with č/š/ž… is inserted via the clipboard, because xdotool's synthetic unicode is silently dropped by some GTK apps; the clipboard is put back afterwards). `clear=true` replaces the field's content, `submit=true` presses Return — one call to fill and submit. |
 | `press_keys("ctrl+a" / "Return" / "ctrl+a Delete")` | Keys, combos, and space-separated **sequences** (xdotool syntax). Every token is validated against the X keysym table **before** anything is pressed — an invalid name anywhere in a sequence errors with nothing pressed. |
@@ -159,6 +160,20 @@ tool. Calls that touch one instance's cursor, keyboard or clipboard are serializ
 two overlapping calls from one agent cannot interleave a `mousemove` with another call's `click`;
 different instances run in parallel.
 
+### Grounding: the app first, pixels second
+
+`parse_screen`, `find_elements` and `wait_for_text` ask the **app** before they look at pixels:
+
+| Source | Covers | What you get |
+|---|---|---|
+| `browser-dom` | the active tab of a Chromium-family browser (over DevTools) | roles, accessible names, states, values and `<select>` options from the DOM, open shadow roots and same-origin iframes included; elements outside the viewport too. A long article is listed in ~0.2 s. Cross-origin iframes are counted in `frames_skipped`, not read; the browser's own toolbar is never listed. |
+| `at-spi` | native GTK, Qt and LibreOffice apps (the display's own accessibility bus) | roles, names, states, values and the actions each widget offers. Needs the AT-SPI packages `install.sh` adds (Kate must be started as `kate -b`). |
+| `vision` | anything with pixels | the backend below. Used when the app exposes fewer than 3 elements (`a11y_unavailable` says why), or when you pass `source="vision"`. |
+
+Ids from the first two are **handles, not remembered pixels**: `click_element`, `fill(element=)` and
+`act` look the element up again before they touch it. All tools carry MCP annotations
+(`readOnlyHint` for the twelve that only look, wait or list), so a client can auto-approve those.
+
 ### Vision backend (selectable, self-diagnosing)
 
 `GLOVEBOX_VISION` env var, or the `.vision-mode` file, or default **`auto`**:
@@ -166,7 +181,7 @@ different instances run in parallel.
 | Mode | `parse_screen` | Needs | When |
 |---|---|---|---|
 | `auto` | the best **ready** backend below (`local` → `basic` → `none`); `status()` says which and why | — | default |
-| `none` | disabled (returns a note) — use `screenshot()` + reason, `clipboard()` for exact text | nothing (mcp, mss, xdotool) | lightest; let the agent's own vision do grounding |
+| `none` | no pixel grounding (accessibility still answers where the app has it; otherwise a note) — use `screenshot()` + reason, `clipboard()` for exact text | nothing (mcp, mss, xdotool) | lightest; let the agent's own vision do grounding |
 | `basic` | Tesseract OCR → text **lines** + coords (+ confidence) | `tesseract-ocr` + `pytesseract` | no GPU; text-only grounding |
 | `local` | OmniParser → text **+ icons** + coords; with the optional **ScreenParser** detector → **typed elements** (button, link, tab, input, checkbox, …) | torch + CUDA + OmniParser weights + NVIDIA GPU ≥ 6 GB | best grounding |
 
@@ -223,8 +238,9 @@ close the ones a server launched when it exits.
 ### One-call action + observe
 
 `click` · `click_element` · `type_text` · `press_keys` · `scroll` · `drag` · `double_click` ·
-`upload_file` · `wait_for_stable` take **`observe`** (`none` default · `screenshot` · `parse`) and
-most take **`settle_ms`**. With `observe="screenshot"` the action returns its result **and** the
+`upload_file` · `wait_for_stable` · `act` · `fill` take **`observe`** (`none` default · `screenshot` ·
+`parse` · `elements`) and most take **`settle_ms`**. `elements` returns the element list alone — no
+image, so a few hundred tokens instead of a screenshot when the app exposes accessibility. With `observe="screenshot"` the action returns its result **and** the
 resulting screen in a single call — no separate screenshot round-trip. Use `settle_ms` when you know
 the delay, `wait_for_stable(observe="screenshot")` when you don't. Default `none` keeps routine steps
 cheap; opt into `screenshot`/`parse` on the steps that change the page (navigations, submits).
@@ -309,7 +325,9 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 
 ## Files
 
-- `server.py` — the MCP server (all 30 tools).
+- `server.py` — the MCP server (all 31 tools).
+- `a11y.py` — accessibility grounding: the in-page DOM walker for browsers (read, re-locate, act over CDP) and the AT-SPI client.
+- `a11y_tree.py` — AT-SPI helper that dumps and operates a native app's accessibility tree; runs under the system `python3` like `a11y_focus.py`.
 - `vision.py` — vision backends: selection rules, GPU preflight, tesseract grouping, OmniParser lifecycle (`check` / `install-omniparser` CLI).
 - `vision_service.py` — the shared OmniParser process (Unix socket, idle-exit, `status` / `stop` CLI).
 - `_paths.py` — shared helpers: the 0700 per-user temp dir, display naming, the liveness probe.

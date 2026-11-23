@@ -53,6 +53,14 @@ navigation. Then confirm the result before the next step. Ids from
 
 ## Grounding: how to know where to click
 
+`find_elements` / `parse_screen` ask the **app's accessibility information first** (`"source"`:
+`browser-dom` for Chromium-family browsers, `at-spi` for GTK/Qt/LibreOffice): exact labels, real
+types, `states`, `value`, elements scrolled out of view included — no GPU. Those ids are handles:
+`click_element(id)` re-locates and scrolls, `act(id)` presses without the pointer,
+`act(id, "set_value", v)` sets a field/select/checkbox, and a vanished element fails with
+`stale: true`. Canvases, games, Tk apps, images and cross-origin iframes are invisible to it —
+then `"source": "vision"` answers, per the table:
+
 | Vision mode | How to find a target |
 |---|---|
 | `local` (GPU) | `find_elements("Save", instance, type="button")` → `click_element(id)`. Elements have real types (button/link/tab/input/checkbox/…) with the ScreenParser detector; `parse_screen` lists everything (capped at 300, `truncated` flagged). |
@@ -66,6 +74,7 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 
 | Goal | Call |
 |---|---|
+| Press / toggle / set without the pointer | `act(id)` · `act(id, "set_value", "…")` — ids from an accessibility `find_elements`; read `before`/`after` |
 | Set a form field, verified | `fill("…", x, y, instance)` or `fill("…", element=id)` — clicks, checks the focus BEFORE typing, replaces, reads back. Fails with nothing typed on a miss or a password field (`allow_password=True` to mean it) |
 | Type into the focused field | click it, then `type_text("…", instance, clear=True, submit=True)` — unicode (č/š/ž) is handled |
 | Keys, shortcuts, sequences | `press_keys("ctrl+l", instance)` · `press_keys("ctrl+a Delete")` — validated before pressing |
@@ -87,14 +96,15 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
 
 ## Rules that bite
 
-- **Labels beat pixels.** With `local`/`basic` vision use `find_elements` → `click_element`
-  and `wait_for_text`; if your client defers tool schemas, load those and `fill` first.
+- **Labels beat pixels.** Use `find_elements` → `click_element` / `act` and `wait_for_text`;
+  if your client defers tool schemas, load those and `fill` first.
 - **Read `hit`.** Browser clicks return the element under the point (`role`, `name`,
   `checked_before`) — if it is not what you meant, you misclicked; fix it before going on.
 - **`fill` is confirmed only when it says so.** `focus_checked: false` = typed blind (canvas,
   game, iframe): read the warning and `click_effect`, then screenshot. `verified: true` = the
   value was read back equal.
-- **Look at less.** `observe_region="x,y,w,h"` returns only that rectangle after an action.
+- **Look at less.** `observe_region="x,y,w,h"` returns only that rectangle after an action;
+  `observe="elements"` returns the element list with no image at all.
 - **`warnings` about the pointer** = someone else is using your instance; screenshot before
   the next step.
 - **A failed observation never un-does the action.** `click(observe="parse")`

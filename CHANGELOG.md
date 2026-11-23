@@ -8,6 +8,36 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+### Added
+- **Accessibility grounding.** `parse_screen`, `find_elements` and `wait_for_text` now ask the
+  app before they look at pixels (`source="auto"`; `"a11y"` and `"vision"` force one side), and
+  the reply's `"source"` says who answered:
+  - `browser-dom` — the active tab of a Chromium-family browser, read over DevTools by an
+    in-page walk of the DOM: roles, accessible names, states, values, `<select>` options, open
+    shadow roots and same-origin iframes. A long Wikipedia article is listed in ~0.2 s
+    (Chrome's own accessibility tree took ~4 s to build and ~7 s to measure on the same page,
+    which is why it is not used).
+  - `at-spi` — native GTK, Qt and LibreOffice apps through the display's own accessibility bus
+    (`a11y_tree.py`, system python).
+  Elements carry `role`, `states`, `value`; with vision mode `none` this is grounding where
+  there was none. Apps exposing fewer than 3 elements fall back to vision with the reason in
+  `a11y_unavailable`.
+- **`act(element, action, value)`** (31 tools) — press a control, set a value, focus or scroll
+  an element through the app's accessibility interface: no pointer, no keyboard, no
+  coordinates. Returns `before`/`after` states and `verified` for `set_value`.
+- Accessibility ids are handles, not remembered pixels: `click_element`, `fill(element=)` and
+  `act` look the element up again first. A moved element is hit where it is (`moved_from`),
+  one outside the viewport is scrolled in (`scrolled`), one that is gone fails with
+  `stale: true` and nothing done.
+- `find_elements` finds elements scrolled out of view in browsers (`"onscreen": false`).
+- `observe="elements"` on every action tool: the element list alone, no image.
+- MCP tool annotations on all tools (`readOnlyHint` on the twelve that only look, wait or
+  list; `destructiveHint: false` on launch/start/put_file/move_mouse/open_file).
+
+### Changed
+- `find_elements`/`wait_for_text` no longer need a vision backend when the app exposes
+  accessibility; `status().tips` and the AT-SPI note say so.
+
 ## [0.6.2] - 2026-11-20
 
 Reported by an agent that lost its MCP connection three times in one session while
