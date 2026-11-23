@@ -58,7 +58,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Build the image (apps: ${{ matrix.apps }})
+      - name: "Build the image (apps: ${{ matrix.apps }})"
         run: docker build -t glovebox-mcp:local --build-arg APPS=${{ matrix.apps }} .
       - name: MCP client for the smoke test (the server itself runs in the container)
         run: pip install "mcp[cli]>=2.0,<3" Pillow
