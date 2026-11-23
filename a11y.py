@@ -221,7 +221,8 @@ for (var i = 0; i < recs.length; i++) {
   }
   out.push(o);
 }
-window.__glovebox = {snap: SNAP, els: els, nodes: nodes.map(function (n, i) { return recs[i].el ? null : n; })};
+// SNAP null = a look that must not replace the handles of the ids the agent is holding
+if (SNAP !== null) window.__glovebox = {snap: SNAP, els: els, nodes: nodes.map(function (n, i) { return recs[i].el ? null : n; })};
 return {elements: out.filter(Boolean), truncated: truncated, frames_skipped: skipped,
         url: location.href, title: document.title, viewport: [window.innerWidth, window.innerHeight]};
 })"""
@@ -304,9 +305,9 @@ def _eval(cmd, js, *args, wait=None):
 
 
 # ---------- browser-dom ----------
-def browser_snapshot(cmd, snap: int, wait: float = 8) -> dict:
+def browser_snapshot(cmd, snap, wait: float = 8) -> dict:
     """{elements, truncated, frames_skipped, url, title} of the active page; registers the element
-    handles in the page under this snapshot id."""
+    handles in the page under this snapshot id (snap=None: look only, register nothing)."""
     d = _eval(cmd, _SNAPSHOT_JS, snap, MAX_ELEMENTS, wait=wait)
     if not isinstance(d, dict):
         raise RuntimeError("the page returned no element list")
@@ -391,6 +392,54 @@ def browser_act(cmd, snap: int, i: int, action: str, value: str = "") -> dict:
     after = browser_locate(cmd, snap, i, scroll=False)
     out["after"] = {"states": after.get("states") or [], "value": after.get("value")}
     out["center"] = after.get("center")
+    return out
+
+
+def diff(before: list, after: list, cap: int = 25) -> dict:
+    """What an action changed, from two element lists of the same app: elements that appeared,
+    disappeared, or kept their identity (type, role, label — the n-th of several equal ones) but
+    changed states or value. Positions are ignored: scrolling is not a change of content."""
+    def key(e):
+        return (e.get("type"), e.get("role"), e.get("label"))
+
+    def facts(e):
+        return {"states": sorted(s for s in e.get("states") or [] if s != "focused"), "value": e.get("value")}
+
+    def brief(e, with_id):
+        out = {k: e[k] for k in ("id", "type", "label", "center", "states", "value") if e.get(k) not in (None, [], "")}
+        if not with_id:
+            out.pop("id", None)
+            out.pop("center", None)
+        return out
+
+    pool = {}
+    for e in before:
+        pool.setdefault(key(e), []).append(e)
+    appeared, changed, same = [], [], 0
+    for e in after:
+        q = pool.get(key(e))
+        if not q:
+            appeared.append(brief(e, True))
+            continue
+        old = q.pop(0)
+        fb, fa = facts(old), facts(e)
+        if fb == fa:
+            same += 1
+        else:
+            changed.append({"id": e["id"], "type": e.get("type"), "label": e.get("label"),
+                            "before": {k: v for k, v in fb.items() if v != fa[k]},
+                            "after": {k: v for k, v in fa.items() if v != fb[k]}})
+    gone = [brief(e, False) for q in pool.values() for e in q]
+
+    def focused(elems):
+        return next((e for e in elems if "focused" in (e.get("states") or [])), None)
+    out = {"appeared": appeared[:cap], "disappeared": gone[:cap], "changed": changed[:cap], "unchanged": same}
+    for name, full in (("appeared", appeared), ("disappeared", gone), ("changed", changed)):
+        if len(full) > cap:
+            out[f"{name}_total"] = len(full)
+    fb, fa = focused(before), focused(after)
+    if fa and (not fb or key(fb) != key(fa)):
+        out["focus"] = {k: fa[k] for k in ("id", "type", "label") if fa.get(k) is not None}
     return out
 
 

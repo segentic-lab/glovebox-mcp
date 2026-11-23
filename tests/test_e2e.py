@@ -802,6 +802,13 @@ def test_native_app_is_read_and_operated_through_accessibility(x99, tmp_path):
                 assert box["type"] == "checkbox"
                 p = payload(await s.call_tool("act", {"element": box["id"], "instance": n}))
                 assert "checked" not in p["before"]["states"] and "checked" in p["after"]["states"]
+                # observe='changes': only what the action changed, no image
+                r = await s.call_tool("act", {"element": box["id"], "instance": n, "observe": "changes"})
+                p = payload(r)
+                ch = [c for c in p["changes"]["changed"] if c["label"] == "Strinjam se"]
+                assert len(r.content) == 1 and p["observed"] == "changes" and ch and ch[0]["before"] == {"states": ["checked"]}
+                box = (await find("strinjam"))["elements"][0]
+                await s.call_tool("act", {"element": box["id"], "instance": n})           # leave it checked
                 # the pointer path uses the same ids, located again at click time
                 save = (await find("shrani"))["elements"][0]["id"]
                 r = await s.call_tool("click_element", {"id": save, "instance": n})
@@ -871,8 +878,11 @@ def test_browser_page_is_read_and_operated_through_the_dom(x99):
                 r = await s.call_tool("act", {"element": sel["id"], "action": "set_value", "value": "Avstrija", "instance": n})
                 assert r.is_error and payload(r)["options"] == ["Slovenija", "Hrvaska"]
                 save = (await find("shrani"))["elements"][0]
-                r = await s.call_tool("click_element", {"id": save["id"], "instance": n})
-                assert payload(r)["hit"]["name"] == "Shrani"
+                r = await s.call_tool("click_element", {"id": save["id"], "instance": n, "observe": "changes",
+                                                        "settle_ms": 300})
+                p = payload(r)
+                assert p["hit"]["name"] == "Shrani" and len(r.content) == 1
+                assert "saved Ana true" in [e["label"] for e in p["changes"]["appeared"]]
                 w = payload(await s.call_tool("wait_for_text", {"text": "saved Ana true", "instance": n, "timeout_ms": 5000}))
                 assert w["satisfied"] is True
                 # below the fold: found, flagged, scrolled in by the click itself

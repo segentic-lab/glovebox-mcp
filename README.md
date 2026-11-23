@@ -112,6 +112,9 @@ forbids the user namespaces its sandbox needs; `status()` reports it (`container
 The container itself is then the isolation layer. Start the container with a seccomp profile that
 allows user namespaces and Glovebox keeps Chromium's sandbox on by itself.
 
+The sandbox user inside the container takes the numeric id of the data folder's owner, so what
+the apps write there belongs to you, whatever your user id is.
+
 `python3 container.py up | down | status | build` manage the container; the image is built for
 amd64 and arm64 (Apple Silicon) and both are exercised in CI.
 
@@ -159,7 +162,7 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | Tool | What |
 |---|---|
 | `status()` | Server + sandbox status in one read-only call: version, the vision diagnosis (requested vs. effective backend and *why*, GPU name/VRAM, OmniParser code/weights, tesseract languages), live instances, and which system deps are present. Run it first — and paste it into bug reports. |
-| `screenshot(instance, region?, scale?, format?)` | `[json, image]`. `region="x,y,w,h"` zooms into a rectangle, `scale=0.5` shrinks, `format="jpeg"` compresses — cut payload or read small text. |
+| `screenshot(instance, region?, scale?, format?, save_as?)` | `[json, image]`. `region="x,y,w,h"` zooms into a rectangle, `scale=0.5` shrinks, `format="jpeg"` compresses — cut payload or read small text. `save_as="step1.png"` writes the image into the staging folder and returns JSON only (evidence to attach, no image tokens). |
 | `parse_screen(instance, source?, granularity?)` | The on-screen elements as JSON (id, type, label, interactive, pixel-center; capped at 300 per call, flagged via `"truncated"`) + a numbered Set-of-Mark image. **`source="auto"` asks the app first** — its accessibility information: exact labels, real element types, `states` (disabled, checked, expanded…), `value`, no GPU, tens of milliseconds — and falls back to vision for apps that expose nothing (canvas, games, Tk); `"source"` in the reply says who answered (`browser-dom`, `at-spi`, `vision`). In vision mode `basic` OCR words are merged into **lines** (`"Sign in"` = one target; `granularity="word"` for single words). |
 | `find_elements(query, type?, source?)` | Parse + filter in one call: the elements whose label contains `query` (and optionally of one `type`), ids ready for `click_element` / `act` / `fill(element=)`. With an accessibility source it also finds what is **scrolled out of view** (`"onscreen": false`) — the click scrolls it in. `count: 0` is an honest "not there". |
 | `act(element, action?, value?)` | Operate an element **through the app's accessibility interface — no pointer, no keyboard, no coordinates**: `press` (button, link, checkbox, menu item), `set_value` (text, a `<select>` option, `true`/`false`, a slider number), `focus`, `scroll_into_view`. Returns the element's states and value `before` and `after` (and `verified` for `set_value`). In browsers `press` is a real, trusted click delivered over DevTools; in native apps it is the widget's AT-SPI action. Refuses stale ids, disabled or read-only elements and unannounced password fields with nothing done. |
@@ -291,8 +294,11 @@ close the ones a server launched when it exits.
 
 `click` · `click_element` · `type_text` · `press_keys` · `scroll` · `drag` · `double_click` ·
 `upload_file` · `wait_for_stable` · `act` · `fill` take **`observe`** (`none` default · `screenshot` ·
-`parse` · `elements`) and most take **`settle_ms`**. `elements` returns the element list alone — no
-image, so a few hundred tokens instead of a screenshot when the app exposes accessibility. With `observe="screenshot"` the action returns its result **and** the
+`parse` · `elements` · `changes`) and most take **`settle_ms`**. `elements` returns the element list
+alone — no image, so a few hundred tokens instead of a screenshot when the app exposes
+accessibility. `changes` returns only **what the action changed**: the elements that appeared (with
+ids you can use at once), disappeared, or changed state or value, plus a focus move and a page
+navigation — the app's accessibility information compared before and after. With `observe="screenshot"` the action returns its result **and** the
 resulting screen in a single call — no separate screenshot round-trip. Use `settle_ms` when you know
 the delay, `wait_for_stable(observe="screenshot")` when you don't. Default `none` keeps routine steps
 cheap; opt into `screenshot`/`parse` on the steps that change the page (navigations, submits).

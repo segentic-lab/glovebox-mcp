@@ -494,8 +494,17 @@ def _launch_lock():
     """Serialize display-number allocation ACROSS server processes (each agent runs its own
     server), so two agents launching at once can't both pick :2."""
     path = os.path.join(HERE, "files", ".launch.lock")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fh = open(path, "w")
+    except OSError as e:
+        _fail("launch_app", f"the staging folder {os.path.dirname(path)} is not writable ({e.strerror}) — nothing "
+                            "was started",
+              fix="make the folder writable by the user the server runs as" +
+                  (" — in container mode it is the host folder mounted at /app/files (container-data/files): "
+                   "recreate the container (python3 container.py down, then up) so it adopts that folder's owner"
+                   if IN_CONTAINER else ""))
+    with fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             yield
@@ -1036,7 +1045,7 @@ def get_screen_size(instance: int = 1) -> str:
 
 @mcp.tool(annotations=_READ_ONLY)
 def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: str = "png",
-               quality: int = 80):
+               quality: int = 80, save_as: str = ""):
     """Screenshot of an instance's display — the ONLY way to see the screen; always look before you act.
 
     Returns [json, image]: {"ok", "instance", "width", "height", "region", "scale", "format",
@@ -1044,7 +1053,11 @@ def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: 
       region="x,y,w,h"  crop to a rectangle (zoom into small text/icons; coordinates stay absolute —
                         add x,y back when you click), default = full display;
       scale=0.5         downscale (0.1–1.0) for cheap overview shots;
-      format="jpeg"     smaller than PNG for photos/video, quality 1–95 (default png, lossless).
+      format="jpeg"     smaller than PNG for photos/video, quality 1–95 (default png, lossless);
+      save_as="shot.png"  write the image into the instance's staging folder files/<N>/ and
+                        return ONLY the JSON ({…, "saved": path, "name", "overwritten"}) — no image
+                        content, so no image tokens: for evidence you will attach or upload, not
+                        look at. Same path rules as put_file; an existing file is replaced.
     For an element list with coordinates use parse_screen (basic/local vision). Prefer
     observe='screenshot' on action tools to act and see the result in one call. Fails (isError)
     if the instance is down, the region is outside the display, or the format is unknown."""
@@ -1056,6 +1069,9 @@ def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: 
         _fail("screenshot", f"unknown format '{format}'", fix="use format='png' or 'jpeg'", instance=n)
     if not (0.1 <= float(scale) <= 1.0):
         _fail("screenshot", f"scale {scale} out of range", fix="use 0.1 <= scale <= 1.0", instance=n)
+    target = root = None
+    if save_as:
+        root, target = _staging_target("screenshot", n, save_as, "saved")
     img = _grab_checked(n, "screenshot")
     W, H = img.width, img.height
     box = None
@@ -1065,10 +1081,35 @@ def screenshot(instance: int = 1, region: str = "", scale: float = 1.0, format: 
     if float(scale) < 1.0:
         img = img.resize((max(1, int(img.width * scale)), max(1, int(img.height * scale))), Image.LANCZOS)
     im = _encode(img, fmt, quality)
-    meta = _ok("screenshot", n, width=W, height=H, region=list(box) if box else None,
-               scale=float(scale), format=fmt, bytes=len(im.data),
-               image_size=[img.width, img.height])
-    return [meta, im]
+    info = dict(width=W, height=H, region=list(box) if box else None, scale=float(scale), format=fmt,
+                bytes=len(im.data), image_size=[img.width, img.height])
+    if target:
+        existed = os.path.exists(target)
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as fh:
+                fh.write(im.data)
+        except OSError as e:
+            _fail("screenshot", f"could not write {target}: {e}", fix="check permissions and free space on the files/ folder",
+                  instance=n)
+        return _ok("screenshot", n, **info, saved=target, name=os.path.relpath(target, root), overwritten=existed)
+    return [_ok("screenshot", n, **info), im]
+
+
+def _staging_target(action, n, name, verb="written"):
+    """(root, target): the real path `name` resolves to inside instance n's staging folder.
+    Fails — nothing written — for absolute paths, '..' and symlinks that lead out of it."""
+    root = os.path.realpath(_files_dir(n))
+    if not name or os.path.isabs(name) or name.endswith(("/", os.sep)):
+        _fail(action, f"bad name {name!r} — nothing was {verb}",
+              fix="pass a relative file path inside the staging folder, e.g. 'data.csv' or 'in/logo.svg'", instance=n)
+    target = os.path.realpath(os.path.join(root, name))
+    if os.path.commonpath([root, target]) != root or target == root:
+        _fail(action, f"{name!r} is outside the staging folder — nothing was {verb}",
+              fix=f"files can only be written under {root} (no '..', no symlinks out of it)", instance=n)
+    if os.path.isdir(target):
+        _fail(action, f"{name!r} is a directory — nothing was {verb}", fix="pass a file name inside it", instance=n)
+    return root, target
 
 
 def _a11y_env(n):
@@ -1091,11 +1132,15 @@ def _a11y_env(n):
     return py, env
 
 
-def _a11y_parse(n):
+def _a11y_parse(n, register=True):
     """(elements, meta) from the app's own accessibility information, or (None, why).
     A Chromium-family browser answers over CDP (the active tab's DOM); anything else is asked
-    over the display's AT-SPI bus. Elements carry private keys (box, path) the caller strips."""
-    snap = _SNAP[n] = _SNAP[n] + 1
+    over the display's AT-SPI bus. Elements carry private keys (box, path) the caller strips.
+    register=False only looks: the ids of the previous parse stay valid (used for the "before"
+    side of observe='changes')."""
+    snap = None
+    if register:
+        snap = _SNAP[n] = _SNAP[n] + 1
     browser_why = None
     try:
         with _cdp(_cdp_port(n), timeout=8) as (cmd, _target, _pages):
@@ -1232,9 +1277,10 @@ def _observe(instance, mode, settle_ms, payload: dict):
     Mode is validated by _validate_observe BEFORE the action runs. The action already happened
     when this runs, so a failed observation is reported inside an ok:true payload ("observed":
     false, "observe_error") — never as a failed action, which would make the agent repeat it."""
-    box = None
+    box = before = None
     if isinstance(mode, tuple):
-        mode, box = mode
+        mode, ctx = mode
+        box, before = (None, ctx) if mode == "changes" else (ctx, None)
     settle_ms = int(settle_ms or 0)
     if settle_ms:
         waited = max(0, min(settle_ms, SETTLE_MAX_MS))
@@ -1254,6 +1300,15 @@ def _observe(instance, mode, settle_ms, payload: dict):
                 img = img.crop(box)
                 payload["observed_region"] = list(box)
             return [_dumps(payload), _encode(img)]
+        if mode == "changes":
+            pr = _do_parse(instance, source="a11y", keep_all=True)     # registers: the new ids are usable
+            payload["observed"] = "changes"
+            payload["source"] = pr.get("source")
+            ch = a11y.diff(before["elements"], pr.get("_all") or [])
+            if before.get("page") and pr.get("page") and before["page"] != pr["page"]:
+                ch["page"] = {"before": before["page"], "after": pr["page"]}
+            payload["changes"] = ch
+            return _dumps(payload)
         if mode in ("parse", "elements"):
             pr = _do_parse(instance)
             for k in ("ok", "action", "instance"):
@@ -1282,12 +1337,21 @@ def _validate_observe(action, instance, observe, region=""):
     """Reject a bad observe mode/region BEFORE performing the action (never act, then error).
     Returns what _observe takes as `mode`: the mode, or (mode, crop box) with observe_region —
     which implies observe='screenshot'."""
-    if observe not in ("none", "screenshot", "parse", "elements"):
+    if observe not in ("none", "screenshot", "parse", "elements", "changes"):
         _fail(action, f"unknown observe mode '{observe}' — the action was not performed",
-              fix="use observe='none' | 'screenshot' | 'parse' | 'elements'", instance=instance)
+              fix="use observe='none' | 'screenshot' | 'parse' | 'elements' | 'changes'", instance=instance)
+    if observe == "changes" and not region:
+        # the "before" side, taken now — without replacing the handles of the ids the caller holds
+        with _ilock(instance):
+            elems, meta = _a11y_parse(instance, register=False)
+        if elems is None:
+            _fail(action, f"observe='changes' compares the app's accessibility information before and after, "
+                          f"and this app exposes none ({meta}) — the action was not performed",
+                  fix="use observe='screenshot' (or observe_region) for this app", instance=instance)
+        return ("changes", {"elements": [_public(e) for e in elems], "page": meta.get("page")})
     if not region:
         return observe
-    if observe in ("parse", "elements"):
+    if observe in ("parse", "elements", "changes"):
         _fail(action, f"observe_region crops a screenshot; it cannot be combined with observe='{observe}' — "
                       "the action was not performed",
               fix="drop observe_region, or use observe='screenshot'", instance=instance)
@@ -1594,9 +1658,12 @@ def click(x: int, y: int, instance: int = 1, button: int = 1, count: int = 1, mo
     count: 1–3 clicks (2 = double-click, 3 = triple-click selects a line/paragraph).
     modifiers: keys held during the click — 'ctrl' (open in new tab / multi-select), 'shift'
     (range select), 'alt', 'super', combinable 'ctrl+shift'; released afterwards whatever happens.
-    `observe`='screenshot'|'parse'|'elements' additionally returns the resulting screen state in
-    the SAME call (saves a round-trip): the image, the image plus the parsed elements, or the
-    element list alone (no image tokens — cheapest when the app exposes accessibility);
+    `observe`='screenshot'|'parse'|'elements'|'changes' additionally returns the resulting screen
+    state in the SAME call (saves a round-trip): the image, the image plus the parsed elements,
+    the element list alone (no image tokens), or only what the action CHANGED — "changes":
+    {appeared: [elements with fresh ids], disappeared, changed: [{id, label, before, after} for
+    states/value], focus?, page?: {before, after}, unchanged: n} from the app's accessibility
+    information before and after (fails before acting, with the fix, for apps that expose none);
     `settle_ms` (max 5000, "settle_clamped": true if you asked for
     more) waits for the UI to update first — use 400–1500 after anything that navigates or
     submits, or wait_for_stable() when you don't know how long. `observe_region`='x,y,w,h' crops
@@ -2522,14 +2589,7 @@ def put_file(name: str, content: str, instance: int = 1, encoding: str = "text",
     n = _require("put_file", instance, up=False)
     if encoding not in ("text", "base64"):
         _fail("put_file", f"unknown encoding '{encoding}' — nothing was written", fix="use encoding='text' or 'base64'", instance=n)
-    root = os.path.realpath(_files_dir(n))
-    if not name or os.path.isabs(name) or name.endswith(("/", os.sep)):
-        _fail("put_file", f"bad name {name!r} — nothing was written",
-              fix="pass a relative file path inside the staging folder, e.g. 'data.csv' or 'in/logo.svg'", instance=n)
-    target = os.path.realpath(os.path.join(root, name))
-    if os.path.commonpath([root, target]) != root or target == root:
-        _fail("put_file", f"{name!r} is outside the staging folder — nothing was written",
-              fix=f"files can only be written under {root} (no '..', no symlinks out of it)", instance=n)
+    root, target = _staging_target("put_file", n, name)
     if encoding == "base64":
         try:
             data = base64.b64decode(content, validate=True)

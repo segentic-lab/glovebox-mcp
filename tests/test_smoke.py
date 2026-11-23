@@ -852,3 +852,94 @@ def test_browser_act_never_types_into_a_readonly_or_disabled_field():
     with pytest.raises(RuntimeError, match="read-only"):
         server.a11y.browser_act(cmd, 1, 0, "set_value", "y")
     assert "Input.insertText" not in calls and "Input.dispatchMouseEvent" not in calls
+
+
+def test_diff_reports_what_an_action_changed_and_ignores_scrolling():
+    before = [
+        {"id": 0, "type": "checkbox", "role": "checkbox", "label": "Strinjam se", "center": [10, 10]},
+        {"id": 1, "type": "input", "role": "textbox", "label": "Ime", "value": "", "center": [10, 40], "states": ["focused"]},
+        {"id": 2, "type": "text", "role": "text", "label": "Košarica je prazna", "center": [10, 70]},
+        {"id": 3, "type": "button", "role": "button", "label": "Dodaj", "center": [10, 100]},
+        {"id": 4, "type": "button", "role": "button", "label": "Dodaj", "center": [10, 130]},
+    ]
+    after = [
+        {"id": 0, "type": "checkbox", "role": "checkbox", "label": "Strinjam se", "center": [10, 10], "states": ["checked", "focused"]},
+        {"id": 1, "type": "input", "role": "textbox", "label": "Ime", "value": "Ana", "center": [10, 400]},   # scrolled: not a change
+        {"id": 2, "type": "text", "role": "text", "label": "1 izdelek v košarici", "center": [10, 70]},
+        {"id": 3, "type": "button", "role": "button", "label": "Dodaj", "center": [10, 100]},
+        {"id": 4, "type": "button", "role": "button", "label": "Dodaj", "center": [10, 130], "states": ["disabled"]},
+        {"id": 5, "type": "button", "role": "button", "label": "Na blagajno", "center": [10, 160]},
+    ]
+    d = server.a11y.diff(before, after)
+    assert [e["label"] for e in d["appeared"]] == ["1 izdelek v košarici", "Na blagajno"] and d["appeared"][1]["id"] == 5
+    assert d["disappeared"] == [{"type": "text", "label": "Košarica je prazna"}]
+    changed = {(c["id"], c["label"]): c for c in d["changed"]}
+    assert changed[(0, "Strinjam se")]["after"] == {"states": ["checked"]}
+    assert changed[(1, "Ime")] == {"id": 1, "type": "input", "label": "Ime", "before": {"value": ""}, "after": {"value": "Ana"}}
+    assert changed[(4, "Dodaj")]["after"] == {"states": ["disabled"]} and (3, "Dodaj") not in changed   # the 2nd of two equal buttons
+    assert d["unchanged"] == 1 and d["focus"] == {"id": 0, "type": "checkbox", "label": "Strinjam se"}
+    assert server.a11y.diff(after, after) == {"appeared": [], "disappeared": [], "changed": [], "unchanged": 6}
+    many = [{"id": i, "type": "text", "role": "text", "label": f"vrstica {i}"} for i in range(40)]
+    d = server.a11y.diff([], many)
+    assert len(d["appeared"]) == 25 and d["appeared_total"] == 40
+
+
+def test_observe_changes_looks_before_without_invalidating_ids(monkeypatch, tmp_path):
+    _vision(monkeypatch, effective="none")
+    monkeypatch.setattr(server, "TMP", str(tmp_path))
+    looks = []
+    after = _a11y_elements() + [{"id": 9, "type": "text", "role": "text", "label": "Napačno geslo", "interactive": False,
+                                 "onscreen": True, "center": [100, 200], "box": [10, 190, 190, 210]}]
+
+    def parse(n, register=True):
+        looks.append(register)
+        return (_a11y_elements() if not register else after), {"source": "browser-dom", "snapshot": 5 if register else None,
+                                                               "page": {"url": "u", "title": "t" if not register else "t2"}}
+    monkeypatch.setattr(server, "_a11y_parse", parse)
+    monkeypatch.setattr(server, "_grab_checked", lambda n, action: Image.new("RGB", (300, 200), "white"))
+    mode = server._validate_observe("click", 7, "changes")
+    assert mode[0] == "changes" and looks == [False]              # the "before" look registers nothing
+    out = server._observe(7, mode, 0, {"action": "click", "detail": "x"})
+    assert isinstance(out, str) and looks == [False, True]
+    d = json.loads(out)
+    assert d["observed"] == "changes" and d["source"] == "browser-dom"
+    assert [e["label"] for e in d["changes"]["appeared"]] == ["Napačno geslo"] and d["changes"]["appeared"][0]["id"] == 9
+    assert d["changes"]["page"] == {"before": {"url": "u", "title": "t"}, "after": {"url": "u", "title": "t2"}}
+    # an app that exposes nothing cannot be diffed: say so BEFORE acting
+    monkeypatch.setattr(server, "_a11y_parse", lambda n, register=True: (None, "no accessibility bus on this display"))
+    with pytest.raises(ToolError) as e:
+        server._validate_observe("click", 7, "changes")
+    err = json.loads(str(e.value))
+    assert "the action was not performed" in err["error"] and "observe='screenshot'" in err["fix"]
+
+
+def test_screenshot_save_as_writes_a_file_and_returns_no_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_require", lambda action, instance, up=True: int(instance))
+    monkeypatch.setattr(server, "_files_dir", lambda n: str(tmp_path))
+    monkeypatch.setattr(server, "_grab_checked", lambda n, action: Image.new("RGB", (64, 48), "red"))
+    out = server.screenshot(instance=7, save_as="evidence/step1.png")
+    assert isinstance(out, str)                                   # JSON only: no image content block
+    d = json.loads(out)
+    assert d["name"] == "evidence/step1.png" and d["overwritten"] is False and d["bytes"] > 0
+    assert Image.open(d["saved"]).size == (64, 48)
+    assert json.loads(server.screenshot(instance=7, save_as="evidence/step1.png"))["overwritten"] is True
+    for bad in ("../out.png", "/etc/x.png", "dir/"):
+        with pytest.raises(ToolError, match="nothing was saved"):
+            server.screenshot(instance=7, save_as=bad)
+    assert len(server.screenshot(instance=7)) == 2                # default: [json, image], unchanged
+
+
+def test_unwritable_staging_folder_is_a_structured_failure(monkeypatch, tmp_path):
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    (ro / "files").mkdir()
+    (ro / "files").chmod(0o500)
+    monkeypatch.setattr(server, "HERE", str(ro))
+    try:
+        with pytest.raises(ToolError) as e:
+            with server._launch_lock():
+                pytest.fail("the lock must not be granted")
+        d = json.loads(str(e.value))
+        assert "not writable" in d["error"] and "nothing was started" in d["error"] and d["fix"]
+    finally:
+        (ro / "files").chmod(0o700)

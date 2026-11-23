@@ -31,6 +31,11 @@ reported to MCP clients during the initialize handshake.
   `stale: true` and nothing done.
 - `find_elements` finds elements scrolled out of view in browsers (`"onscreen": false`).
 - `observe="elements"` on every action tool: the element list alone, no image.
+- `observe="changes"`: only what the action changed — elements that appeared (with usable
+  ids), disappeared, or changed state/value, a focus move, a page navigation — from the app's
+  accessibility information before and after. Fails before acting for apps that expose none.
+- `screenshot(save_as="name.png")` writes the image into the staging folder and returns JSON
+  only.
 - MCP tool annotations on all tools (`readOnlyHint` on the twelve that only look, wait or
   list; `destructiveHint: false` on launch/start/put_file/move_mouse/open_file).
 
@@ -49,6 +54,11 @@ reported to MCP clients during the initialize handshake.
 ### Changed
 - `find_elements`/`wait_for_text` no longer need a vision backend when the app exposes
   accessibility; `status().tips` and the AT-SPI note say so.
+
+### Fixed
+- `launch_app` on an unwritable staging folder raised a raw `PermissionError`; it now fails
+  structured, with the fix (found by the container CI job, whose runner is not uid 1000 —
+  the container now gives its sandbox user the id of the mounted data folder's owner).
 
 ### Known limits
 - Container: Chromium runs with `--no-sandbox` under Docker's default seccomp profile

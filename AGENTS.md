@@ -92,7 +92,8 @@ answered in `"source"`.
 | Find one element by its text | `find_elements("Sign in", instance, type="button")` → `click_element(id)` — no 300-element scan |
 | Press / toggle without the pointer | `act(id, instance)` — returns `before`/`after` states (`checked`, `expanded`, …) |
 | Set a value without typing | `act(id, "set_value", "Hrvaška", instance)` — text, select option, `"true"`/`"false"`, slider number; `verified` says it stuck |
-| See what changed, without an image | any action with `observe="elements"` → the element list only |
+| See what changed, without an image | any action with `observe="changes"` → `changes: {appeared, disappeared, changed, focus?, page?}`; `observe="elements"` → the whole element list |
+| Keep a screenshot as evidence | `screenshot(instance, save_as="step1.png")` → a file in `files/<N>/`, JSON only (no image tokens) |
 | Wait for a page/dialog by its text | `wait_for_text("Welcome", instance)` → `satisfied` / `timed_out` (honest) |
 | Click a known pixel | `click(x, y, instance, observe="screenshot")` — `count=2` double, `modifiers="ctrl"` ctrl-click |
 | Set a form field (click + focus check + replace + read back) | `fill("Nadja Kovačič", x, y, instance)` or `fill("…", element=<id>)` — a miss or an unannounced password field fails with nothing typed; passwords need `allow_password=True` |

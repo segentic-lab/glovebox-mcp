@@ -23,8 +23,12 @@ PAGE = ("data:text/html,<title>t</title><h1>Obrazec</h1><label for=n>Ime</label>
 
 
 def payload(res):
-    text = res.content[0].text
-    return json.loads(text[text.find("{"):])
+    """The tool's JSON; an unstructured crash becomes {"error": text} so the check fails by name."""
+    text = res.content[0].text if res.content else ""
+    try:
+        return json.loads(text[text.find("{"):])
+    except ValueError:
+        return {"ok": False, "error": text[-400:]}
 
 
 async def main() -> int:
@@ -55,6 +59,9 @@ async def main() -> int:
             p = payload(await s.call_tool("launch_app", {"command": "chromium about:blank", "size": "1100x750"}))
             check("a browser instance launches", p.get("ok") is True, json.dumps(p)[:300])
             n = p.get("instance")
+            if n is None:
+                print(f"{sum(checks)}/{len(checks)} checks passed — stopping: no instance to drive", flush=True)
+                return 1
             try:
                 for _ in range(40):
                     res = await s.call_tool("browser", {"action": "navigate", "url": PAGE, "instance": n})

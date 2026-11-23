@@ -1,3 +1,8 @@
 #!/bin/sh
-# What `docker exec -i glovebox glovebox-server` runs: the MCP server over stdio.
+# What `docker exec -i glovebox glovebox-server` runs: the MCP server over stdio, as the
+# unprivileged sandbox user (docker exec enters as root, because the entrypoint needs root for a
+# moment — see entrypoint.sh).
+if [ "$(id -u)" = "0" ]; then
+  exec setpriv --reuid=glovebox --regid=glovebox --init-groups env HOME=/home/glovebox /opt/venv/bin/python /app/server.py "$@"
+fi
 exec /opt/venv/bin/python /app/server.py "$@"

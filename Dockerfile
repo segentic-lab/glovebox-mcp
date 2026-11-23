@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb xserver-xephyr openbox xdotool wmctrl xclip scrot \
       x11-utils x11-xkb-utils x11-xserver-utils xkb-data xfonts-base \
       dbus dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi \
-      python3 python3-venv procps util-linux tini ca-certificates xdg-utils \
+      python3 python3-venv procps util-linux passwd tini ca-certificates xdg-utils \
       tesseract-ocr tesseract-ocr-eng tesseract-ocr-slv \
       chromium fonts-liberation fonts-dejavu-core fonts-noto-color-emoji \
       x11vnc novnc websockify \
@@ -43,13 +43,14 @@ RUN chmod 755 /usr/local/bin/glovebox-entrypoint /usr/local/bin/glovebox-server 
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir "/app[basic]"
 
-USER glovebox
-ENV HOME=/home/glovebox \
-    GLOVEBOX_IN_CONTAINER=1 \
+# No USER line: the entrypoint starts as root to match the sandbox user to the owner of the
+# mounted data folders, then drops to `glovebox`; glovebox-server drops the same way.
+ENV GLOVEBOX_IN_CONTAINER=1 \
     GLOVEBOX_HOST_DISPLAY=:0 \
     GLOVEBOX_VISION=auto \
     GLOVEBOX_VIEW_URL="http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
 VOLUME ["/app/files", "/app/profiles"]
 EXPOSE 6080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD xdpyinfo -display :0 >/dev/null 2>&1 || exit 1
+# the last step as root is the entrypoint's own; everything the agent starts runs as `glovebox`
 ENTRYPOINT ["tini", "--", "glovebox-entrypoint"]

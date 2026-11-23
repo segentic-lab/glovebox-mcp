@@ -42,7 +42,7 @@ VIEW_URL = f"http://localhost:{PORT}/vnc.html?autoconnect=1&resize=scale"
 # settings of the launcher itself or of a host install — meaningless (or wrong) inside the container
 NOT_FORWARDED = {"GLOVEBOX_MODE", "GLOVEBOX_HOST_DISPLAY", "GLOVEBOX_CONTAINER", "GLOVEBOX_IMAGE", "GLOVEBOX_DATA",
                  "GLOVEBOX_VIEW_PORT", "GLOVEBOX_DESKTOP_SIZE", "GLOVEBOX_VNC_PASSWORD", "GLOVEBOX_IN_CONTAINER",
-                 "GLOVEBOX_VIEW_URL"}
+                 "GLOVEBOX_VIEW_URL", "GLOVEBOX_UID", "GLOVEBOX_GID"}
 
 
 class Problem(RuntimeError):
@@ -101,6 +101,9 @@ def run_args(image: str) -> list:
             "-p", f"127.0.0.1:{PORT}:6080",
             "-v", f"{os.path.join(DATA, 'files')}:/app/files",
             "-v", f"{os.path.join(DATA, 'profiles')}:/app/profiles"]
+    if hasattr(os, "getuid"):
+        # the sandbox user takes this id, so what it writes into the data folder is yours
+        args += ["-e", f"GLOVEBOX_UID={os.getuid()}", "-e", f"GLOVEBOX_GID={os.getgid()}"]
     for k in ("GLOVEBOX_DESKTOP_SIZE", "GLOVEBOX_VNC_PASSWORD"):
         if os.environ.get(k):
             args += ["-e", f"{k}={os.environ[k]}"]

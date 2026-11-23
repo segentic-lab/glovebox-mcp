@@ -70,6 +70,8 @@ def test_a_new_container_keeps_its_ports_and_data_on_this_machine(monkeypatch, t
     assert f"127.0.0.1:{container.PORT}:6080" in args            # the viewer is never published to the network
     assert f"{tmp_path / 'data' / 'files'}:/app/files" in args and (tmp_path / "data" / "profiles").is_dir()
     assert "GLOVEBOX_VNC_PASSWORD=hunter2" in args
+    import os
+    assert f"GLOVEBOX_UID={os.getuid()}" in args                 # the sandbox user writes the data folder as you
     assert not any(a.startswith("--privileged") or a == "host" for a in args)
 
 

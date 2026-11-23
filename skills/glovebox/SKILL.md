@@ -105,7 +105,8 @@ Coordinates are absolute pixels, top-left origin, inside the instance's display
   game, iframe): read the warning and `click_effect`, then screenshot. `verified: true` = the
   value was read back equal.
 - **Look at less.** `observe_region="x,y,w,h"` returns only that rectangle after an action;
-  `observe="elements"` returns the element list with no image at all.
+  `observe="changes"` returns only what the action changed (appeared / disappeared / changed
+  elements, focus, page), `observe="elements"` the whole list — neither sends an image.
 - **`warnings` about the pointer** = someone else is using your instance; screenshot before
   the next step.
 - **A failed observation never un-does the action.** `click(observe="parse")`
