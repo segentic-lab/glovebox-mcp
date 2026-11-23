@@ -63,6 +63,30 @@ a done action never reported as failed, per-instance locks, pre-validated keys, 
 service hardened, ScreenParser merge fixed, five new tools (find_elements, wait_for_text,
 browser, manage_window, start_app), the Claude Code skill. Details in CHANGELOG 0.5.0.
 
+## 0.7.0 — accessibility grounding + container mode (done 2026-11-23, unreleased)
+
+Came out of comparing glovebox with the other computer-use servers (computer-use-linux,
+desktop-touch-mcp, Open Computer Use, supercorp computer-use-mcp, Cua). Taken from them: ask
+the app before the pixels (AT-SPI natively, the DOM in browsers), operate elements without the
+pointer (`act`), ids that are handles and go stale honestly, "what changed" replies
+(`observe="changes"`), list-only observation, tool annotations, a screenshot to a file — and a
+Docker container with a web viewer so it runs on macOS/Windows and confines files. Deliberately
+not taken: Wayland input backends and background seats (separate displays already give every
+agent its own cursor), a shell tool (it would undo the sandbox).
+
+Left open by this round:
+
+- **Cross-origin iframes** are counted (`frames_skipped`), not read. CDP lists them as their own
+  targets; the walker would have to run in each and be offset by the frame's rectangle.
+- **Chromium's sandbox in the container** — off under Docker's default seccomp profile. A
+  maintained profile (or documenting Podman rootless, where user namespaces work) would turn it
+  back on; the server already detects when it can.
+- **GPU vision in the container** — the image ships OCR only. Needs the NVIDIA container toolkit
+  and the OmniParser weights mounted in, never baked in (the icon detector is AGPL-3.0).
+- **The browser's own toolbar and native menus of a browser** are not in the DOM; Chromium
+  exposes them over AT-SPI only with accessibility forced on.
+- **Publishing the image** (GHCR) is a manual workflow, not yet run.
+
 ## 0.5.x — candidates, not yet committed
 
 - Xephyr `-ac` → an xauth cookie per instance (today any local user can attach to an instance
