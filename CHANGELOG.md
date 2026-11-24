@@ -8,6 +8,8 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-24
+
 ### Added
 - **Interactive `./install.sh`.** Run on a terminal without a mode, the installer asks where
   the sandbox should run (this desktop or a Docker container), which vision backend or
