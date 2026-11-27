@@ -158,3 +158,14 @@ def test_container_mode_hands_over_before_the_heavy_imports():
     src = open(os.path.join(os.path.dirname(container.__file__), "server.py"), encoding="utf-8").read()
     assert src.index("container.exec_server()") < src.index("from mcp.server.mcpserver import MCPServer")
     assert '__name__ == "__main__" and os.environ.get("GLOVEBOX_MODE"' in src
+
+
+def test_image_copies_every_module_the_server_imports():
+    """A module added to pyproject but not to the Dockerfile's COPY breaks the container at
+    import time — and only the container CI job would notice."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    modules = re.search(r"py-modules = \[(.*?)\]", open(os.path.join(root, "pyproject.toml")).read(), re.S).group(1)
+    copied = " ".join(l for l in open(os.path.join(root, "Dockerfile")).read().splitlines() if ".py" in l)
+    missing = [m for m in re.findall(r'"(\w+)"', modules) if f"{m}.py" not in copied]
+    assert missing == []

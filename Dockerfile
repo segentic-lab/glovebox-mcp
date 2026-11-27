@@ -54,7 +54,7 @@ RUN useradd -m -u ${UID} -s /bin/bash glovebox \
 WORKDIR /app
 COPY --chown=glovebox:glovebox pyproject.toml README.md _version.py ./
 COPY --chown=glovebox:glovebox server.py vision.py vision_service.py host_bridge.py a11y.py a11y_focus.py \
-     a11y_tree.py _paths.py container.py AGENTS.md ./
+     a11y_tree.py appmenu.py panel.py _paths.py container.py AGENTS.md ./
 COPY docker/entrypoint.sh /usr/local/bin/glovebox-entrypoint
 COPY docker/glovebox-server /usr/local/bin/glovebox-server
 RUN chmod 755 /usr/local/bin/glovebox-entrypoint /usr/local/bin/glovebox-server \
