@@ -39,7 +39,10 @@ unblocks you. Read `fix` and do what it says before trying anything else.
    `launched_here: false` and a `title`). **Never drive another agent's
    instance**; launch your own.
 3. `launch_app("chromium")` / `launch_app("gimp", size="1600x1000")` → use the
-   returned `instance` id in EVERY call. Check `warnings`.
+   returned `instance` id in EVERY call. Check `warnings`. `panel=true` adds a
+   taskbar + apps menu for a person watching (32 px at the bottom; not for you —
+   use `start_app` / `manage_window`); `launch_app("", panel=true)` is an empty
+   desktop. Apps and links opened inside an instance stay inside it.
 4. `wait_for_stable(instance)` then `screenshot(instance)` — the app needs a
    moment to draw.
 

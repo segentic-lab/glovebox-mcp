@@ -240,7 +240,7 @@ multimodal model (fine for Claude Code, Cursor, and other image-capable MCP clie
 | `put_file(name, content, encoding?, overwrite?)` | Write a file (text, or binary as base64; max 10 MB) into the instance's staging folder — hand the sandbox something you produced, then `open_file`/`upload_file` it by name. Only inside `files/<N>/`: absolute paths, `..` and symlinks out are refused; an existing file needs `overwrite=true`. |
 | `list_files()` | The instance's staging folder `files/<N>/` + entries with size, mtime and a `partial` flag for in-progress downloads. |
 | `app_log(instance, lines?)` | Tail of the launched app's stderr — read it when an app crashed or drew nothing. |
-| `launch_app(command, name?, size?)` · `list_instances()` · `close_instance(n \| all_launched=true)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). `list_instances` shows each window's `title`; instances closed by hand disappear and their number is reused. |
+| `launch_app(command, name?, size?, panel?)` · `list_instances()` · `close_instance(n \| all_launched=true)` | Multi-instance control (see below). `launch_app` also makes the window usable by a **person**: the host keyboard layout is copied in (`keyboard`) and the clipboard bridge started (`clipboard_sync`). `list_instances` shows each window's `title`; instances closed by hand disappear and their number is reused. |
 | `wait_ms(ms)` · `get_screen_size()` | Timing / sandbox size + effective vision backend. |
 
 Every control tool takes **`instance=N`** and optional **`observe`** / **`settle_ms`** /
@@ -315,11 +315,38 @@ it never silently falls back; only `auto` does, and it says so. Tesseract langua
 Every control tool takes **`instance=N`** (default 1 = the `start-display.sh` sandbox). Spin up more —
 each its own Xephyr display/window on the host desktop:
 
-- `launch_app(command, name?, size?)` → starts the next free `:N` running **any** GUI app
+- `launch_app(command, name?, size?, panel?)` → starts the next free `:N` running **any** GUI app
   (`chromium`, `gimp`, `inkscape`, `xterm`, …). Chromium-family browsers auto-get X11 flags, a
   per-instance profile, a remote-debugging port, and downloads routed to `files/<N>/`; other GTK apps
   get D-Bus isolation. Returns the instance id, size and any warnings.
 - `list_instances()` · `close_instance(n)` · `app_log(n)`.
+
+**Taskbar and apps menu (for a person).** `launch_app(..., panel=true)` — or `GLOVEBOX_PANEL=1`
+for every launch, including `start-display.sh` — puts a 32 px taskbar on the bottom edge: an
+**Applications** menu (the machine's installed GUI apps by group), **Run…**, a button per open
+window, a clock. With `panel=true` the command may be empty: an instance with just the desktop.
+With or without the taskbar, **right-click on the empty desktop** shows the same apps list plus
+the open windows.
+
+Everything started from there opens **inside the instance**, because it goes through the same
+launcher as `launch_app` (`server.py run N -- command`): an X11-only environment (no Wayland
+socket), a private session bus, and a per-instance profile for the programs that would otherwise
+hand the launch to a copy already running on your desktop — Chromium-family browsers, Firefox /
+Thunderbird, LibreOffice. The same holds for a **link clicked inside an app**: the instance's
+`XDG_DATA_DIRS` starts with overriding `.desktop` entries for those programs, so the default
+browser resolves to the launcher; when a browser already runs in the instance the link becomes a
+new tab in it. What this cannot do:
+
+- A program that allows one running copy and keeps its lock elsewhere (Electron apps such as
+  VS Code or Element, Telegram, KeePassXC) still hands over to the copy on your desktop when one
+  is running. The taskbar detects it — the program quits without a window here — and says so;
+  nothing is silently lost. Close the outside copy or start the program in the instance first.
+- Snap packages keep the real session bus (snapd needs it to start them). Snap Firefox did not
+  reach a nested display in our test (`cannot open display`); snap Chromium works.
+- A `.desktop` override of your own in `~/.local/share/applications` comes before glovebox's.
+- The taskbar needs GTK 3 for the system python (`python3-gi`, `gir1.2-gtk-3.0`; `install.sh`
+  adds them); without it the launch reports a warning and starts without the bar. It is part of
+  screenshots and of OCR/vision parses, and deliberately absent from accessibility grounding.
 
 **A person can use the window too.** Two things do not cross the nested-X-server boundary on their
 own, and `launch_app` (and `start-display.sh`) fix both:
@@ -384,6 +411,7 @@ in-progress downloads.
 | `GLOVEBOX_VISION` | `auto` (or `.vision-mode`) | `auto` · `none` · `basic` · `local` |
 | `GLOVEBOX_HOST_DISPLAY` | `:0` | host display where new Xephyr windows appear |
 | `GLOVEBOX_CLEANUP_ON_EXIT` | off | `1` → close the instances this server launched when it exits |
+| `GLOVEBOX_PANEL` | off | `1` → every `launch_app` (and `start-display.sh`) gets the taskbar; per launch: `panel=true` |
 | `GLOVEBOX_CLIPBOARD_SYNC` | `1` | per-instance host bridge (clipboard mirroring + keymap kept equal to the host); `0` = off |
 | `GLOVEBOX_CLIPBOARD_POLL` | `0.5` | seconds between clipboard polls in the bridge |
 | `GLOVEBOX_KEYBOARD` | unset | force a layout for new instances (`si`, `de(nodeadkeys)`) instead of copying the host keymap |
@@ -455,6 +483,7 @@ pkill Xephyr      # closes the sandbox (browser + WM + display)
 - `skills/glovebox/SKILL.md` — a Claude Code skill that teaches an agent the workflow (`./install.sh skill` installs it).
 - Launched apps are told to draw on the instance's X display (`XDG_SESSION_TYPE=x11`, `QT_QPA_PLATFORM=xcb`), LibreOffice gets a per-instance profile (`profiles/libreoffice-<N>`) so it cannot hand a document to a LibreOffice on the host, and `close_instance` ends the whole process group it started.
 - `a11y_focus.py` — AT-SPI helper for `fill()`'s focus check; runs under the system `python3` (needs `python3-gi`, `gir1.2-atspi-2.0`, `at-spi2-core` — `install.sh` adds them; without them `fill` still works and reports `focus_checked: false`).
+- `appmenu.py` + `panel.py` — the apps menu (right-click on the desktop) and the optional taskbar; `panel.py` runs under the system `python3` with GTK 3. `server.py run N -- command` is the launcher both use.
 - `host_bridge.py` — per-instance host bridge: host keymap copy (AltGr fix) + clipboard mirroring (`keymap` / `serve` / `spawn` / `status` CLI).
 - `install.sh` — mode-aware installer (`none` / `basic` / `local` / `container`).
 - `Dockerfile`, `docker/`, `docker-compose.yml` — the container image (virtual desktop + web viewer + the server).

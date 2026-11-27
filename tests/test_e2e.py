@@ -412,6 +412,45 @@ def test_launch_app_lifecycle(x99):
     asyncio.run(run())
 
 
+HAS_GTK = subprocess.run(["/usr/bin/python3", os.path.join(REPO, "panel.py"), "--check"],
+                         capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(not (shutil.which("Xephyr") and HAS_XMESSAGE and HAS_WM and HAS_GTK and shutil.which("wmctrl")),
+                    reason="Xephyr, xmessage, openbox, wmctrl or GTK 3 for python3 not installed")
+def test_panel_desktop_and_launcher(x99):
+    """launch_app("", panel=true) is a desktop with the taskbar; the bar reserves its strip, and
+    what the launcher (`server.py run N`) starts appears on THAT instance and dies with it."""
+    async def run():
+        async with glovebox({"GLOVEBOX_HOST_DISPLAY": f":{DISP}"}) as (s, _):
+            r = await s.call_tool("launch_app", {"command": "", "size": "800x600"})
+            assert r.is_error                                   # no command and no panel: nothing to start
+
+            p = payload(await s.call_tool("launch_app", {"command": "", "size": "800x600", "panel": True}))
+            assert p["ok"] and p["panel"] is True and p["warnings"] == [] and p["name"] == "desktop"
+            n = p["instance"]
+            env = {**os.environ, "DISPLAY": f":{n}"}
+            try:
+                titles = subprocess.run(["wmctrl", "-l"], env=env, capture_output=True, text=True).stdout
+                assert "Glovebox panel" in titles
+                area = subprocess.run(["xprop", "-root", "_NET_WORKAREA"], env=env, capture_output=True, text=True).stdout
+                assert "800, 568" in area                       # 600 - the 32 px bar
+
+                out = subprocess.run([sys.executable, os.path.join(REPO, "server.py"), "run", str(n), "--wait-window", "10",
+                                      "--", "xmessage", "-center", "from-the-menu"],
+                                     env={**os.environ, "GLOVEBOX_VISION": "none"}, capture_output=True, text=True)
+                res = json.loads(out.stdout.strip().splitlines()[-1])
+                assert res["ok"] and res["window"] is True and res["instance"] == n
+                pid = res["pid"]
+                assert "xmessage" in subprocess.run(["wmctrl", "-l", "-x"], env=env, capture_output=True, text=True).stdout.lower()
+            finally:
+                r = await s.call_tool("close_instance", {"instance": n})
+            assert not r.is_error
+            time.sleep(1.0)
+            assert not os.path.exists(f"/proc/{pid}") or b"xmessage" not in open(f"/proc/{pid}/cmdline", "rb").read()
+    asyncio.run(run())
+
+
 @pytest.mark.skipif(not (shutil.which("Xephyr") and HAS_XMESSAGE and shutil.which("xkbcomp")
                          and shutil.which("setxkbmap") and shutil.which("xmodmap")),
                     reason="Xephyr/xmessage/x11-xkb-utils/xmodmap not installed")

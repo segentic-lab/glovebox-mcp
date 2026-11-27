@@ -35,8 +35,22 @@ export DISPLAY="$DISP"
 unset WAYLAND_DISPLAY
 export GDK_BACKEND=x11
 
-# minimal window manager (movable/decorated windows)
-pgrep -x openbox >/dev/null 2>&1 || { openbox >/tmp/openbox-x1.log 2>&1 & sleep 0.6; }
+# minimal window manager (movable/decorated windows). Its right-click desktop menu lists the
+# installed apps and the open windows; every item starts through `server.py run 1`, so the app
+# opens inside this window (see appmenu.py).
+if ! pgrep -x openbox >/dev/null 2>&1; then
+  RC="$("$PY" "$DIR/server.py" wm-config 1 2>/dev/null || true)"
+  if [ -n "$RC" ]; then openbox --config-file "$RC" >/tmp/openbox-x1.log 2>&1 &
+  else openbox >/tmp/openbox-x1.log 2>&1 & fi
+  sleep 0.6
+fi
+# optional taskbar (apps menu, open windows, clock): GLOVEBOX_PANEL=1 ./start-display.sh
+case "${GLOVEBOX_PANEL:-}" in 1|true|yes|on)
+  if /usr/bin/python3 "$DIR/panel.py" --check 2>/dev/null; then
+    NO_AT_BRIDGE=1 /usr/bin/python3 "$DIR/panel.py" 1 --py "$PY" --server "$DIR/server.py" >/tmp/panel-x1.log 2>&1 &
+    sleep 0.6
+  else echo "⚠ no taskbar: GTK 3 for python3 is missing (sudo apt install python3-gi gir1.2-gtk-3.0)"; fi ;;
+esac
 
 # browser with its OWN profile in this folder (logins live here, separate from your real browser).
 # --ozone-platform=x11 → render to :1 (Xephyr); --disable-gpu → reliable in a nested X server.

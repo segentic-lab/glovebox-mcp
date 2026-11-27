@@ -158,6 +158,14 @@ answered in `"source"`.
   (and puts the previous clipboard text back afterwards). Just call it; don't type special
   characters key-by-key. In terminals paste with `press_keys("shift+Insert")` after
   `clipboard(action="set")`.
+- **Taskbar / apps menu are for the person, not for you.** `launch_app(..., panel=true)` (or
+  `GLOVEBOX_PANEL=1`; result field `panel`) adds a 32 px taskbar at the bottom, and right-click on
+  the empty desktop lists the installed apps and open windows. Use `start_app` / `manage_window`
+  instead of clicking them. With the bar the usable height is 32 px less; it shows in screenshots
+  and OCR/vision parses but not in accessibility results. `launch_app("", panel=true)` gives an
+  empty desktop. Apps started from either, and links clicked inside apps, open in the instance;
+  a browser link becomes a new tab in the instance's running browser. Firefox and Thunderbird now
+  get a per-instance profile (`profiles/<name>-<N>`), like Chromium and LibreOffice.
 - **The person can type and paste into the window too** — `launch_app` copies the host keyboard
   layout into the instance (`keyboard.verified` in the result) and starts a bridge that mirrors
   TEXT between the host and instance clipboards (`clipboard_sync`). If a user reports "@ does not

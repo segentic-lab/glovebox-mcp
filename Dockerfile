@@ -24,7 +24,7 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb xserver-xephyr openbox xdotool wmctrl xclip scrot \
       x11-utils x11-xkb-utils x11-xserver-utils xkb-data xfonts-base \
-      dbus dbus-x11 at-spi2-core gir1.2-atspi-2.0 python3-gi \
+      dbus dbus-x11 at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
       python3 python3-venv procps util-linux passwd tini ca-certificates xdg-utils \
       tesseract-ocr tesseract-ocr-eng tesseract-ocr-slv \
       chromium fonts-liberation fonts-dejavu-core fonts-noto-color-emoji \

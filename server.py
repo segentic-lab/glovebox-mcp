@@ -16,6 +16,8 @@ Input is unicode-safe (xdotool); screenshots via mss; grounding backend is selec
   GLOVEBOX_VISION_SERVICE = 1                     (local mode: parse through ONE shared OmniParser process
                                                    per machine instead of loading the models in every agent's
                                                    server; 0 = always in-process. See vision_service.py)
+  GLOVEBOX_PANEL = 1                              (every launch_app gets the taskbar: apps menu, open windows,
+                                                   clock — for a person working in the window. See panel.py)
   GLOVEBOX_CLIPBOARD_SYNC = 1                     (per-instance host bridge: clipboard text mirrored both ways
                                                    + keymap kept equal to the host's. See host_bridge.py)
 
@@ -75,6 +77,7 @@ import mss
 from PIL import Image, ImageChops, ImageDraw
 
 import a11y
+import appmenu
 import host_bridge
 import vision
 import vision_service
@@ -105,6 +108,10 @@ A11Y_APT = "sudo apt install at-spi2-core gir1.2-atspi-2.0 python3-gi"
 FOCUS_SLACK = 8  # px: toolkits accept clicks slightly outside the rectangle they report over AT-SPI
 _PTR = {}        # N -> (x, y) where THIS server last left the pointer (foreign-input detection)
 _GROUPS = defaultdict(set)   # N -> process groups this server started on that display (killed on close)
+FIREFOXES = ("firefox", "firefox-esr", "librewolf", "thunderbird")
+PANEL_DEFAULT = os.environ.get("GLOVEBOX_PANEL", "").strip().lower() in ("1", "true", "yes", "on")
+PANEL_HELPER = os.path.join(HERE, "panel.py")
+PANEL_APT = "sudo apt install python3-gi gir1.2-gtk-3.0"
 OFFICE = ("libreoffice", "soffice", "lowriter", "localc", "loimpress", "lodraw", "lobase", "lomath")
 _LOCK = threading.RLock()
 _ILOCKS = defaultdict(threading.RLock)   # per-instance: one cursor/keyboard/clipboard = one sequence at a time
@@ -665,7 +672,12 @@ def _group_pids(n) -> list:
     """Live processes that belong to a process group this server started for instance n AND
     still have DISPLAY=:n in their environment — both conditions, so a recycled group id can
     never point the kill at an unrelated process."""
-    groups = _GROUPS.get(int(n)) or set()
+    groups = set(_GROUPS.get(int(n)) or ())
+    try:       # apps started from the panel / desktop menu (`server.py run`) are recorded on disk
+        with open(_groups_file(n)) as fh:
+            groups |= {int(x) for x in fh.read().split() if x.isdigit()}
+    except OSError:
+        pass
     if not groups:
         return []
     want = f"DISPLAY={_disp(n)}".encode()
@@ -710,6 +722,14 @@ def _close(n) -> bool:
         time.sleep(0.5)
         _kill_groups(n, signal.SIGKILL)     # the display is gone; whatever ignored SIGTERM has no purpose left
     _GROUPS.pop(int(n), None)
+    _SHADOWED.discard(n)
+    for leftover in (_groups_file(n),):
+        try:
+            os.unlink(leftover)
+        except OSError:
+            pass
+    for d in (_shadow_dir(n), os.path.join(TMP, f"openbox-{int(n)}")):
+        shutil.rmtree(d, ignore_errors=True)
     _forget(n)
     return True
 
@@ -766,6 +786,119 @@ def _userns_ok() -> bool:
     return _USERNS["ok"]
 
 
+_SHADOWED = set()
+
+
+def _shadow_dir(n) -> str:
+    return os.path.join(TMP, f"desktop-{int(n)}")
+
+
+def _shadow_env(n, appenv):
+    """Put instance n's overriding .desktop entries first in the app's XDG_DATA_DIRS (see
+    appmenu.write_shadow): a link clicked INSIDE an app then opens in a browser on this instance,
+    not in the browser running on the host desktop. Best effort — never fails a launch."""
+    try:
+        d = _shadow_dir(n)
+        if n not in _SHADOWED or not os.path.isdir(d):
+            appmenu.write_shadow(d, n, sys.executable, os.path.abspath(__file__), set(BROWSERS + FIREFOXES + OFFICE))
+            _SHADOWED.add(n)
+        rest = [x for x in (appenv.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":") if x and x != d]
+        appenv["XDG_DATA_DIRS"] = ":".join([d] + rest)
+    except Exception:   # noqa: BLE001
+        pass
+
+
+def _is_snap(program: str) -> bool:
+    """Snap programs must keep the real session bus: snapd asks the user's systemd over it for
+    the app's scope, and on a private bus the snap refuses to start ("is not a snap cgroup")."""
+    path = shutil.which(program) or program
+    return path.startswith("/snap/") or os.path.realpath(path) == "/usr/bin/snap"
+
+
+def _wm_env(n) -> dict:
+    """Env for the window manager and the panel: what they start (menu items) must not be able
+    to reach the host's Wayland compositor."""
+    e = _env(n)
+    e.pop("WAYLAND_DISPLAY", None)
+    e.update(GDK_BACKEND="x11", XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb")
+    return e
+
+
+def _start_wm(n) -> list:
+    """Start openbox on instance n with glovebox's desktop menu (right-click on the empty
+    desktop: the installed apps by group + the open windows; every item starts through
+    `server.py run`, i.e. inside this instance). Returns warnings."""
+    if not shutil.which("openbox"):
+        return ["openbox (window manager) is not installed: Xephyr ignores xdotool pointer motion "
+                "without a WM, so clicks land in the screen center — install openbox"]
+    args, warnings = ["openbox"], []
+    try:
+        d = os.path.join(TMP, f"openbox-{int(n)}")
+        os.makedirs(d, exist_ok=True)
+        menu = os.path.join(d, "menu.xml")
+        with open(menu, "w", encoding="utf-8") as fh:
+            fh.write(appmenu.openbox_menu(n, sys.executable, os.path.abspath(__file__)))
+        rc = appmenu.openbox_rc(menu)
+        if rc:
+            with open(os.path.join(d, "rc.xml"), "w", encoding="utf-8") as fh:
+                fh.write(rc)
+            args += ["--config-file", os.path.join(d, "rc.xml")]
+    except Exception as e:   # noqa: BLE001 — the menu is a convenience; the WM itself must start
+        warnings.append(f"desktop menu not set up: {e!r}")
+    _reap(subprocess.Popen(args, env=_wm_env(n), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    return warnings
+
+
+_PANEL_PY = {"at": 0.0, "python": None}
+
+
+def _panel_python():
+    """An interpreter that can import GTK 3 — normally the system python3 — or None."""
+    if time.time() - _PANEL_PY["at"] < 60:
+        return _PANEL_PY["python"]
+    found = None
+    for c in dict.fromkeys(x for x in (sys.executable, "/usr/bin/python3", shutil.which("python3")) if x):
+        try:
+            if subprocess.run([c, PANEL_HELPER, "--check"], capture_output=True, timeout=10).returncode == 0:
+                found = c
+                break
+        except Exception:   # noqa: BLE001
+            continue
+    _PANEL_PY.update(at=time.time(), python=found)
+    return found
+
+
+def _start_panel(n) -> list:
+    """Start the taskbar on instance n (apps menu, open windows, clock). Returns warnings — a
+    missing panel never fails a launch."""
+    py = _panel_python()
+    if not py:
+        return [f"the panel was not started: GTK 3 for python3 is not installed ({PANEL_APT})"]
+    env = _wm_env(n)
+    env["NO_AT_BRIDGE"] = "1"      # the panel stays out of the accessibility tree agents read
+    try:
+        with open(_app_log(n), "ab") as lf:
+            proc = subprocess.Popen([py, PANEL_HELPER, str(int(n)), "--py", sys.executable,
+                                     "--server", os.path.abspath(__file__)],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=lf, start_new_session=True)
+    except OSError as e:
+        return [f"the panel was not started: {e}"]
+    _GROUPS[int(n)].add(proc.pid)
+    _reap(proc)
+    for _ in range(20):            # wait for its strut, so the app maximizes ABOVE it
+        time.sleep(0.15)
+        if proc.poll() is not None:
+            return [f"the panel exited at once (code {proc.returncode}); app_log({n}) has its stderr"]
+        r = subprocess.run(["wmctrl", "-l"], env=_env(n), capture_output=True, text=True)
+        if "Glovebox panel" in (r.stdout or ""):
+            break
+    return []
+
+
+def _groups_file(n) -> str:
+    return os.path.join(TMP, f"groups-{int(n)}")
+
+
 def _app_env_args(n, command):
     """Env + argv to launch a GUI `command` on instance n's display. Chromium-family browsers get
     X11 flags, a per-instance profile, and a CDP debug port; other GTK apps get D-Bus isolation so
@@ -783,6 +916,7 @@ def _app_env_args(n, command):
     # register on the instance's AT-SPI bus without a screen reader running (fill's focus check).
     appenv.update(XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb", SDL_VIDEODRIVER="x11", CLUTTER_BACKEND="x11",
                   MOZ_ENABLE_WAYLAND="0", QT_ACCESSIBILITY="1", QT_LINUX_ACCESSIBILITY_ALWAYS_ON="1")
+    _shadow_env(n, appenv)
     if base in BROWSERS:
         appenv.pop("WAYLAND_DISPLAY", None)
         appenv["GDK_BACKEND"] = "x11"
@@ -810,6 +944,13 @@ def _app_env_args(n, command):
     else:
         appenv.pop("WAYLAND_DISPLAY", None)
         appenv.setdefault("GDK_BACKEND", "x11")
+        if base in FIREFOXES and not any(a.lstrip("-") in ("profile", "P", "ProfileManager") for a in args[1:]):
+            # Firefox is single-instance per PROFILE too: with the default one, a Firefox already
+            # running on the host answers "already running" (or takes the URL). Its own profile
+            # per instance keeps it here; a second launch joins the Firefox of THIS instance.
+            prof = os.path.join(HERE, "profiles", f"{base}-{n}")
+            os.makedirs(prof, exist_ok=True)
+            args[1:1] = ["--profile", prof]
         if base in OFFICE and "UserInstallation" not in command:
             # LibreOffice is single-instance per PROFILE: without its own, the launch is handed to
             # a LibreOffice already running — on the host desktop or another instance — and the
@@ -817,7 +958,7 @@ def _app_env_args(n, command):
             prof = os.path.join(HERE, "profiles", f"libreoffice-{n}")
             os.makedirs(prof, exist_ok=True)
             args.append(f"-env:UserInstallation=file://{prof}")
-        if shutil.which("dbus-run-session"):
+        if shutil.which("dbus-run-session") and not _is_snap(args[0]):
             args = ["dbus-run-session", "--"] + args
     return appenv, args, base
 
@@ -875,16 +1016,25 @@ def _resolve_path(action, n, filepath):
 
 # ---------- instance management ----------
 @mcp.tool(annotations=_ADDITIVE)
-def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
+def launch_app(command: str, name: str = "", size: str = "1440x900", panel: bool = False) -> str:
     """Launch a GUI app in its OWN new Xephyr display/window and return its instance id.
 
     `command` is any shell command ('chromium', 'xterm', 'gimp', 'inkscape file.svg', …).
     Chromium-family browsers (chromium, google-chrome, brave, microsoft-edge, vivaldi, opera)
     automatically get X11 flags, a per-instance profile, downloads routed to files/<N>/, and a CDP
     debug port (needed by upload_file and browser()). Other GTK apps get D-Bus isolation so they
-    render on this display, not the host.
+    render on this display, not the host. Firefox and Thunderbird get a per-instance profile too.
 
-    Returns {"ok", "instance", "display", "name", "files_dir", "width", "height", "warnings": [...],
+    panel=true adds a taskbar along the bottom edge (about 32 px: an Applications menu, the open
+    windows, a clock) for a PERSON working in the window; with it `command` may be empty — an
+    instance with just the desktop. It is in screenshots and is read by OCR/vision, but not by
+    accessibility grounding; agents do not need it (start_app / manage_window do the same).
+    GLOVEBOX_PANEL=1 turns it on for every launch. With or without it, right-click on the empty
+    desktop lists the installed apps and the open windows. Whatever is started from the panel,
+    that menu, or a link clicked inside an app goes through the same launcher as this tool, so
+    it opens inside this instance.
+
+    Returns {"ok", "instance", "display", "name", "files_dir", "width", "height", "panel": bool, "warnings": [...],
     "keyboard": {method, host_layout, verified}, "clipboard_sync": bool} — pass that instance id to every
     control tool. "keyboard" says how the window got the host's keyboard layout ("host-keymap" =
     exact copy, verified against the host; Xephyr alone maps AltGr as plain Alt, so a person could
@@ -905,12 +1055,15 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
     screenshot. Instances outlive this server process unless GLOVEBOX_CLEANUP_ON_EXIT=1."""
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", size or ""):
         _fail("launch_app", f"bad size '{size}' — nothing was started", fix="use size='WIDTHxHEIGHT', e.g. '1440x900'")
+    want_panel = bool(panel) or PANEL_DEFAULT
+    desktop_only = want_panel and not (command or "").strip()
     try:
-        if not shlex.split(command):
+        if not desktop_only and not shlex.split(command):
             raise ValueError("empty command")
     except ValueError as e:
         _fail("launch_app", f"cannot parse command {command!r}: {e} — nothing was started",
-              fix="pass a shell-quoted command such as 'chromium' or \"inkscape 'my file.svg'\"")
+              fix="pass a shell-quoted command such as 'chromium' or \"inkscape 'my file.svg'\"; "
+                  "an empty command is only valid with panel=true (an instance with just the desktop)")
     with _LOCK, _launch_lock():
         _register_existing()
         n = _next_free()
@@ -918,7 +1071,7 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
             with open(_xephyr_log(n), "wb") as lf:
                 xeph = subprocess.Popen(
                     ["Xephyr", _disp(n), "-screen", size, "-resizeable", "-ac",
-                     "-title", f"Glovebox {_disp(n)} — {name or command[:28]}"],
+                     "-title", f"Glovebox {_disp(n)} — {name or command[:28] or 'desktop'}"],
                     env=_host_env(), stdout=subprocess.DEVNULL, stderr=lf)
         except FileNotFoundError:
             _fail("launch_app", "Xephyr is not installed", fix="sudo apt install xserver-xephyr (./install.sh does it)")
@@ -945,30 +1098,35 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
                   fix=f"check that the host display {HOST} is reachable (GLOVEBOX_HOST_DISPLAY) and the size "
                       f"is valid; the full log is {_xephyr_log(n)}",
                   instance=n)
-        INSTANCES[n] = {"name": name or command, "command": command, "size": size,
+        INSTANCES[n] = {"name": name or command or "desktop", "command": command or "(desktop)", "size": size,
                         "xephyr_pid": xeph.pid, "app_pid": None}
         _LAUNCHED.add(n)
     try:
-        warnings = []
-        if shutil.which("openbox"):
-            _reap(subprocess.Popen(["openbox"], env=_env(n), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        else:
-            warnings.append("openbox (window manager) is not installed: Xephyr ignores xdotool pointer motion "
-                            "without a WM, so clicks land in the screen center — install openbox")
+        warnings = _start_wm(n)
         time.sleep(0.5)
         keyboard, clip_sync, bridge_warnings = _bridge_host(n)
         warnings += bridge_warnings
-        appenv, args, base = _app_env_args(n, command)
-        app, err, fix = _spawn_checked(n, args, appenv, _app_log(n),
-                                       "use a command that exists in PATH (e.g. 'chromium', 'xmessage hi')")
-        if err:
-            _close(n)
-            _fail("launch_app", err,
-                  fix=fix or "check that the command exists and its arguments are valid; try it manually with "
-                             "DISPLAY set to the instance display; app_log() would show its stderr",
-                  instance=n)
-        _maximize_async(n)
-        INSTANCES[n].update(name=name or base, app_pid=app.pid)
+        has_panel = False
+        if want_panel:
+            panel_warnings = _start_panel(n)
+            has_panel = not panel_warnings
+            warnings += panel_warnings
+            if desktop_only and not has_panel:
+                _close(n)
+                _fail("launch_app", f"{panel_warnings[0]} — nothing was started",
+                      fix=f"{PANEL_APT}, or pass a command to launch", instance=n)
+        if not desktop_only:
+            appenv, args, base = _app_env_args(n, command)
+            app, err, fix = _spawn_checked(n, args, appenv, _app_log(n),
+                                           "use a command that exists in PATH (e.g. 'chromium', 'xmessage hi')")
+            if err:
+                _close(n)
+                _fail("launch_app", err,
+                      fix=fix or "check that the command exists and its arguments are valid; try it manually with "
+                                 "DISPLAY set to the instance display; app_log() would show its stderr",
+                      instance=n)
+            _maximize_async(n)
+            INSTANCES[n].update(name=name or base, app_pid=app.pid)
         W, H = _geometry(n)
     except ToolError:
         raise
@@ -977,7 +1135,7 @@ def launch_app(command: str, name: str = "", size: str = "1440x900") -> str:
         _fail("launch_app", f"launch failed after the display started (closed again): {e!r}",
               fix="retry; if it persists report status() output", instance=n)
     return _ok("launch_app", n, name=INSTANCES[n]["name"], command=command,
-               files_dir=_files_dir(n), width=W, height=H, warnings=warnings,
+               files_dir=_files_dir(n), width=W, height=H, panel=has_panel, warnings=warnings,
                keyboard=keyboard, clipboard_sync=clip_sync)
 
 
@@ -2963,9 +3121,9 @@ def status() -> str:
     service: {running, pid, loaded, detector, served, in_flight, idle_s, …} — the shared
     per-machine OmniParser process (one GPU load for all agents; starts on first use, idle-exits)},
     tesseract: {binary, pytesseract, langs, lang, ready, reason}},
-    "instances": [...same as list_instances], "keyboard": {host_layout, override}, "clipboard_sync":
+    "instances": [...same as list_instances], "panel_default": bool (GLOVEBOX_PANEL), "keyboard": {host_layout, override}, "clipboard_sync":
     {enabled, poll_s, note}, "deps": {xdotool, xclip, xephyr, openbox, wmctrl, xdpyinfo, xkbcomp,
-    setxkbmap, dbus_run_session, tesseract, nvidia_smi, xprop, atspi: true|false}, "notes": [...], "tips": [...]}
+    setxkbmap, dbus_run_session, tesseract, nvidia_smi, xprop, atspi, gtk3: true|false}, "notes": [...], "tips": [...]}
     ("tips": the tools that save the most round-trips on this setup — read them once).
     "vision.effective" is the grounding backend actually in use (none|basic|local), re-resolved
     every 20 s (installing OmniParser takes effect without a restart); when GLOVEBOX_VISION=auto it
@@ -3008,6 +3166,9 @@ def status() -> str:
         ("dbus_run_session", "dbus-run-session"), ("tesseract", "tesseract"), ("nvidia_smi", "nvidia-smi"),
         ("xprop", "xprop"))}
     deps["atspi"] = bool(_a11y_python())
+    deps["gtk3"] = bool(_panel_python())      # the optional taskbar (launch_app panel=true)
+    if PANEL_DEFAULT and not deps["gtk3"]:
+        notes.append(f"GLOVEBOX_PANEL=1 but GTK 3 for python3 is missing: instances start without the taskbar — {PANEL_APT}")
     if not deps["atspi"]:
         notes.append("AT-SPI bindings are missing: native apps cannot be read through accessibility "
                      "(find_elements falls back to vision, act() is unavailable) and fill() types blind there "
@@ -3043,11 +3204,137 @@ def status() -> str:
     return _ok("status", version=__version__, host_display=HOST, tmp_dir=TMP, container=container,
                cleanup_on_exit=_truthy(os.environ.get("GLOVEBOX_CLEANUP_ON_EXIT", "")),
                vision={**v, "gpu": gpu, "omniparser": omni, "tesseract": tess},
-               instances=_instance_rows(), keyboard=keyboard,
+               instances=_instance_rows(), panel_default=PANEL_DEFAULT, keyboard=keyboard,
                clipboard_sync={"enabled": CLIP_SYNC, "poll_s": host_bridge.POLL_S,
                                "note": "host clipboard text is mirrored into every instance" if CLIP_SYNC else "off"},
                deps=deps, notes=notes, tips=tips)
 
 
+def _windows(n) -> set:
+    try:
+        r = subprocess.run(["wmctrl", "-l"], env=_env(n), capture_output=True, text=True, timeout=5)
+        return {line.split()[0] for line in r.stdout.splitlines() if line.strip()}
+    except Exception:   # noqa: BLE001
+        return set()
+
+
+def _open_in_running_browser(n, urls):
+    """Open `urls` (or one new tab) in the browser that already runs on instance n; the number
+    of tabs opened, or None when no browser answers on the instance's DevTools port."""
+    import urllib.parse
+    import urllib.request
+    port = _cdp_port(n)
+    try:
+        _cdp_pages(port, timeout=2)
+    except Exception:   # noqa: BLE001
+        return None
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    count = 0
+    for u in (urls or ["chrome://newtab/"]):
+        if "://" not in u and not u.startswith(("about:", "data:")):
+            u = "file://" + urllib.parse.quote(os.path.abspath(u)) if os.path.exists(u) else "https://" + u
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/json/new?{urllib.parse.quote(u, safe=':/?&=%#@+,;~')}",
+                                         method="PUT")
+            opener.open(req, timeout=5).read()
+            count += 1
+        except Exception:   # noqa: BLE001
+            continue
+    if not count:
+        return None
+    try:       # bring the browser forward, like a second launch would
+        r = subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "chrom"], env=_env(n),
+                           capture_output=True, text=True, timeout=5)
+        wid = (r.stdout.split() or [""])[-1]
+        if wid:
+            subprocess.run(["xdotool", "windowactivate", wid], env=_env(n), capture_output=True, timeout=5)
+    except Exception:   # noqa: BLE001
+        pass
+    return count
+
+
+def _cli_run(argv) -> int:
+    """`server.py run N [--wait-window S] -- COMMAND…` — start COMMAND inside instance N with the
+    same handling as start_app (X11-only environment, private session bus, per-instance browser /
+    Firefox / LibreOffice profile). The panel, the desktop menu and the overriding .desktop
+    entries call this. Prints one JSON line; with --wait-window it also says whether a window
+    appeared on the instance ("window": false and "exited": 0 = the program handed the request to
+    a copy running somewhere else and quit)."""
+    wait = 0
+    try:
+        n = int(argv[0])
+        rest = argv[1:]
+        if rest[:1] == ["--wait-window"]:
+            wait, rest = min(60, max(0, int(rest[1]))), rest[2:]
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        if not rest:
+            raise ValueError("no command")
+    except (IndexError, ValueError):
+        print(json.dumps({"ok": False, "error": "usage: server.py run N [--wait-window S] -- COMMAND…"}))
+        return 2
+    if not _up(n):
+        print(json.dumps({"ok": False, "instance": n, "error": f"instance {n} is not running"}))
+        return 1
+    before = _windows(n) if wait else set()
+    appenv, args, base = _app_env_args(n, shlex.join(rest))
+    if base in BROWSERS:
+        # One Chromium-family browser per instance (they share its DevTools port, and a second
+        # one on the same profile just quits): when one runs here, a link or a second "open the
+        # browser" becomes a new tab in it.
+        opened = _open_in_running_browser(n, [a for a in rest[1:] if not a.startswith("-")])
+        if opened is not None:
+            print(json.dumps({"ok": True, "instance": n, "window": True, "exited": 0, "tabs": opened,
+                              "via": "running-browser"}))
+            return 0
+    real = args[2] if args[:2] == ["dbus-run-session", "--"] and len(args) > 2 else args[0]
+    if not shutil.which(real):
+        print(json.dumps({"ok": False, "instance": n, "error": f"command not found: {real}"}))
+        return 1
+    with open(_app_log(n), "ab") as lf:
+        proc = subprocess.Popen(args, env=appenv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=lf, start_new_session=True)
+    try:       # so close_instance ends it with the instance
+        with open(_groups_file(n), "a") as fh:
+            fh.write(f"{proc.pid}\n")
+    except OSError:
+        pass
+    out = {"ok": True, "instance": n, "pid": proc.pid}
+    if wait:
+        deadline, window = time.time() + wait, False
+        while time.time() < deadline:
+            if _windows(n) - before:
+                window = True
+                break
+            if proc.poll() is not None and time.time() > deadline - wait + 1.5:
+                window = bool(_windows(n) - before)
+                break
+            time.sleep(0.3)
+        out.update(window=window, exited=proc.poll())
+    print(json.dumps(out))
+    return 0
+
+
+def _cli_wm_config(argv) -> int:
+    """`server.py wm-config N` — write instance N's openbox config and print its path ('' when
+    there is no rc.xml to derive it from). start-display.sh uses it for the :1 sandbox."""
+    n = int(argv[0])
+    d = os.path.join(TMP, f"openbox-{n}")
+    os.makedirs(d, exist_ok=True)
+    menu = os.path.join(d, "menu.xml")
+    with open(menu, "w", encoding="utf-8") as fh:
+        fh.write(appmenu.openbox_menu(n, sys.executable, os.path.abspath(__file__)))
+    rc = appmenu.openbox_rc(menu)
+    if rc:
+        with open(os.path.join(d, "rc.xml"), "w", encoding="utf-8") as fh:
+            fh.write(rc)
+        print(os.path.join(d, "rc.xml"))
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["run"]:
+        sys.exit(_cli_run(sys.argv[2:]))
+    if sys.argv[1:2] == ["wm-config"]:
+        sys.exit(_cli_wm_config(sys.argv[2:]))
     mcp.run()

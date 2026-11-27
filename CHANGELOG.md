@@ -8,6 +8,36 @@ reported to MCP clients during the initialize handshake.
 
 ## [Unreleased]
 
+### Added
+- **Taskbar for a person working in the window.** `launch_app(..., panel=true)`, or
+  `GLOVEBOX_PANEL=1` for every launch and `start-display.sh`, adds a 32 px bar on the bottom edge:
+  an Applications menu built from the machine's `.desktop` entries, Run…, a button per open
+  window, a clock. With it `command` may be empty (an instance with just the desktop). The launch
+  result has `panel`, `status()` has `panel_default` and `deps.gtk3`. Needs GTK 3 for the system
+  python (`gir1.2-gtk-3.0`, added to `install.sh` and the container image); without it the launch
+  warns and starts without the bar.
+- **Right-click on the empty desktop** of every instance lists the installed apps by group and
+  the open windows (it replaces the distribution's openbox menu; keys and theme are untouched).
+- `server.py run N [--wait-window S] -- COMMAND` starts a program inside instance N with the
+  handling of `start_app`; the taskbar, the desktop menu and link handling use it.
+
+### Changed
+- **Whatever is opened from inside an instance stays inside it.** Menu and taskbar launches go
+  through the launcher. A link clicked in an app resolves the default browser to an overriding
+  `.desktop` entry (first in the instance's `XDG_DATA_DIRS`) and opens in a browser on the
+  instance — as a new tab when one already runs there — instead of in the browser on the host
+  desktop. The old openbox menu started programs with the host's Wayland socket in reach.
+- Firefox, LibreWolf and Thunderbird get a per-instance profile (`profiles/<name>-<N>`), so a
+  copy running on the host no longer answers "already running" or takes the launch.
+- Snap programs are no longer wrapped in a private session bus: snapd refused to start them
+  there ("is not a snap cgroup").
+- The window manager and what it starts no longer inherit `WAYLAND_DISPLAY`.
+
+### Known limits
+- Single-instance programs that keep their lock outside glovebox's reach (Electron apps,
+  Telegram, KeePassXC) still hand over to a copy running on the host; the taskbar reports it.
+- Snap Firefox did not connect to a nested display in testing (`cannot open display`).
+
 ## [0.7.1] - 2026-11-24
 
 ### Added
