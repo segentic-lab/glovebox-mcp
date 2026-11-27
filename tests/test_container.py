@@ -163,6 +163,7 @@ def test_container_mode_hands_over_before_the_heavy_imports():
 def test_image_copies_every_module_the_server_imports():
     """A module added to pyproject but not to the Dockerfile's COPY breaks the container at
     import time — and only the container CI job would notice."""
+    import os
     import re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     modules = re.search(r"py-modules = \[(.*?)\]", open(os.path.join(root, "pyproject.toml")).read(), re.S).group(1)
